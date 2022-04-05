@@ -1,6 +1,6 @@
-from typing import Callable, Any, Sequence, NamedTuple
+from typing import Callable, Any, Sequence, NamedTuple, Optional, List
 
-from AnyQt.QtCore import Qt, QSortFilterProxyModel, QModelIndex
+from AnyQt.QtCore import Qt, QSortFilterProxyModel, QModelIndex, QObject
 
 
 class FilterProxyModel(QSortFilterProxyModel):
@@ -20,9 +20,10 @@ class FilterProxyModel(QSortFilterProxyModel):
         ("predicate", Callable[[Any], bool])
     ])
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__filters = []
+    def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QObject], Any) -> None
+        super().__init__(parent, **kwargs)
+        self.__filters = []  # type: List[FilterProxyModel.Filter]
 
     def setFilters(self, filters):
         # type: (Sequence[FilterProxyModel.Filter]) -> None
@@ -34,8 +35,9 @@ class FilterProxyModel(QSortFilterProxyModel):
     def filterAcceptsRow(self, row, parent):
         # type: (int, QModelIndex) -> bool
         source = self.sourceModel()
+        assert source is not None
 
-        def apply(f):
+        def apply(f: FilterProxyModel.Filter):
             index = source.index(row, f.column, parent)
             data = source.data(index, f.role)
             try:

@@ -18,13 +18,15 @@ class TestPreviewDialog(test.QAppTestCase):
 
         current = [None]
         w.currentIndexChanged.connect(current.append)
-        status = w.exec_()
+        self.singleShot(50, w.close)
+        status = w.exec()
 
         if status and len(current) > 1:
             self.assertIs(current[-1], w.currentIndex())
 
         w.setItems(["A", "B"])
         w.show()
-        status = w.exec_()
+        self.singleShot(50, w.close)
+        status = w.exec()
         if status:
             self.assertTrue(w.currentIndex() != -1)

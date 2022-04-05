@@ -2,13 +2,86 @@
 Undo/Redo Commands
 
 """
-from typing import Callable
+import typing
+from typing import Callable, Optional, Tuple, List, Any
 
 from AnyQt.QtWidgets import QUndoCommand
 
+if typing.TYPE_CHECKING:
+    from ..scheme import (
+        Scheme, SchemeNode, SchemeLink, BaseSchemeAnnotation,
+        SchemeTextAnnotation, SchemeArrowAnnotation
+    )
+    Pos = Tuple[float, float]
+    Rect = Tuple[float, float, float, float]
+    Line = Tuple[Pos, Pos]
 
-class AddNodeCommand(QUndoCommand):
+
+class UndoCommand(QUndoCommand):
+    """
+    For pickling
+    """
+    def __init__(self, text, parent=None):
+        QUndoCommand.__init__(self, text, parent)
+        self.__parent = parent
+        self.__initialized = True
+
+        # defined and initialized in __setstate__
+        # self.__child_states = {}
+        # self.__children = []
+
+    def __getstate__(self):
+        return {
+            **{k: v for k, v in self.__dict__.items()},
+            '_UndoCommand__initialized': False,
+            '_UndoCommand__text': self.text(),
+            '_UndoCommand__children':
+                [self.child(i) for i in range(self.childCount())]
+        }
+
+    def __setstate__(self, state):
+        if hasattr(self, '_UndoCommand__initialized') and \
+                self.__initialized:
+            return
+
+        text = state['_UndoCommand__text']
+        parent = state['_UndoCommand__parent']  # type: UndoCommand
+
+        if parent is not None and \
+                (not hasattr(parent, '_UndoCommand__initialized') or
+                 not parent.__initialized):
+            # will be initialized in parent's __setstate__
+            if not hasattr(parent, '_UndoCommand__child_states'):
+                setattr(parent, '_UndoCommand__child_states', {})
+            parent.__child_states[self] = state
+            return
+
+        # init must be called on unpickle-time to recreate Qt object
+        UndoCommand.__init__(self, text, parent)
+        if hasattr(self, '_UndoCommand__child_states'):
+            for child, s in self.__child_states.items():
+                child.__setstate__(s)
+
+        self.__dict__ = {k: v for k, v in state.items()}
+        self.__initialized = True
+
+    @staticmethod
+    def from_QUndoCommand(qc: QUndoCommand, parent=None):
+        if type(qc) == QUndoCommand:
+            qc.__class__ = UndoCommand
+
+        qc.__parent = parent
+
+        children = [qc.child(i) for i in range(qc.childCount())]
+        for child in children:
+            UndoCommand.from_QUndoCommand(child, parent=qc)
+
+        return qc
+
+
+class AddNodeCommand(UndoCommand):
     def __init__(self, scheme, node, parent=None):
+        # type: (Scheme, SchemeNode, Optional[UndoCommand]) -> None
         super().__init__("Add %s" % node.title, parent)
         self.scheme = scheme
         self.node = node
@@ -20,14 +93,15 @@ class AddNodeCommand(QUndoCommand):
         self.scheme.remove_node(self.node)
 
 
-class RemoveNodeCommand(QUndoCommand):
+class RemoveNodeCommand(UndoCommand):
     def __init__(self, scheme, node, parent=None):
+        # type: (Scheme, SchemeNode, Optional[UndoCommand]) -> None
         super().__init__("Remove %s" % node.title, parent)
         self.scheme = scheme
         self.node = node
-
-        links = scheme.input_links(node) + \
-                scheme.output_links(node)
+        self._index = -1
+        links = scheme.input_links(self.node) + \
+                scheme.output_links(self.node)
 
         for link in links:
             RemoveLinkCommand(scheme, link, parent=self)
@@ -35,16 +109,19 @@ class RemoveNodeCommand(QUndoCommand):
     def redo(self):
         # redo child commands
         super().redo()
+        self._index = self.scheme.nodes.index(self.node)
         self.scheme.remove_node(self.node)
 
     def undo(self):
-        self.scheme.add_node(self.node)
+        assert self._index != -1
+        self.scheme.insert_node(self._index, self.node)
         # Undo child commands
         super().undo()
 
 
-class AddLinkCommand(QUndoCommand):
+class AddLinkCommand(UndoCommand):
     def __init__(self, scheme, link, parent=None):
+        # type: (Scheme, SchemeLink, Optional[UndoCommand]) -> None
         super().__init__("Add link", parent)
         self.scheme = scheme
         self.link = link
@@ -56,42 +133,44 @@ class AddLinkCommand(QUndoCommand):
         self.scheme.remove_link(self.link)
 
 
-class RemoveLinkCommand(QUndoCommand):
+class RemoveLinkCommand(UndoCommand):
     def __init__(self, scheme, link, parent=None):
+        # type: (Scheme, SchemeLink, Optional[UndoCommand]) -> None
         super().__init__("Remove link", parent)
         self.scheme = scheme
         self.link = link
+        self._index = -1
 
     def redo(self):
+        self._index = self.scheme.links.index(self.link)
         self.scheme.remove_link(self.link)
 
     def undo(self):
-        self.scheme.add_link(self.link)
+        assert self._index != -1
+        self.scheme.insert_link(self._index, self.link)
+        self._index = -1
 
 
-class InsertNodeCommand(QUndoCommand):
-    def __init__(self, scheme, new_node, old_link, new_links, parent=None):
+class InsertNodeCommand(UndoCommand):
+    def __init__(
+            self,
+            scheme,     # type: Scheme
+            new_node,   # type: SchemeNode
+            old_link,   # type: SchemeLink
+            new_links,  # type: Tuple[SchemeLink, SchemeLink]
+            parent=None # type: Optional[UndoCommand]
+    ):  # type: (...) -> None
         super().__init__("Insert widget into link", parent)
-        self.scheme = scheme
-        self.inserted_widget = new_node
-        self.original_link = old_link
-        self.new_links = new_links
 
-    def redo(self):
-        self.scheme.add_node(self.inserted_widget)
-        self.scheme.remove_link(self.original_link)
-        self.scheme.add_link(self.new_links[0])
-        self.scheme.add_link(self.new_links[1])
-
-    def undo(self):
-        self.scheme.remove_link(self.new_links[0])
-        self.scheme.remove_link(self.new_links[1])
-        self.scheme.add_link(self.original_link)
-        self.scheme.remove_node(self.inserted_widget)
+        AddNodeCommand(scheme, new_node, parent=self)
+        RemoveLinkCommand(scheme, old_link, parent=self)
+        for link in new_links:
+            AddLinkCommand(scheme, link, parent=self)
 
 
-class AddAnnotationCommand(QUndoCommand):
+class AddAnnotationCommand(UndoCommand):
     def __init__(self, scheme, annotation, parent=None):
+        # type: (Scheme, BaseSchemeAnnotation, Optional[UndoCommand]) -> None
         super().__init__("Add annotation", parent)
         self.scheme = scheme
         self.annotation = annotation
@@ -103,21 +182,27 @@ class AddAnnotationCommand(QUndoCommand):
         self.scheme.remove_annotation(self.annotation)
 
 
-class RemoveAnnotationCommand(QUndoCommand):
+class RemoveAnnotationCommand(UndoCommand):
     def __init__(self, scheme, annotation, parent=None):
+        # type: (Scheme, BaseSchemeAnnotation, Optional[UndoCommand]) -> None
         super().__init__("Remove annotation", parent)
         self.scheme = scheme
         self.annotation = annotation
+        self._index = -1
 
     def redo(self):
+        self._index = self.scheme.annotations.index(self.annotation)
         self.scheme.remove_annotation(self.annotation)
 
     def undo(self):
-        self.scheme.add_annotation(self.annotation)
+        assert self._index != -1
+        self.scheme.insert_annotation(self._index, self.annotation)
+        self._index = -1
 
 
-class MoveNodeCommand(QUndoCommand):
+class MoveNodeCommand(UndoCommand):
     def __init__(self, scheme, node, old, new, parent=None):
+        # type: (Scheme, SchemeNode, Pos, Pos, Optional[UndoCommand]) -> None
         super().__init__("Move", parent)
         self.scheme = scheme
         self.node = node
@@ -131,8 +216,9 @@ class MoveNodeCommand(QUndoCommand):
         self.node.position = self.old
 
 
-class ResizeCommand(QUndoCommand):
+class ResizeCommand(UndoCommand):
     def __init__(self, scheme, item, new_geom, parent=None):
+        # type: (Scheme, SchemeTextAnnotation, Rect, Optional[UndoCommand]) -> None
         super().__init__("Resize", parent)
         self.scheme = scheme
         self.item = item
@@ -146,8 +232,9 @@ class ResizeCommand(QUndoCommand):
         self.item.rect = self.old_geom
 
 
-class ArrowChangeCommand(QUndoCommand):
+class ArrowChangeCommand(UndoCommand):
     def __init__(self, scheme, item, new_line, parent=None):
+        # type: (Scheme, SchemeArrowAnnotation, Line, Optional[UndoCommand]) -> None
         super().__init__("Move arrow", parent)
         self.scheme = scheme
         self.item = item
@@ -161,8 +248,15 @@ class ArrowChangeCommand(QUndoCommand):
         self.item.set_line(*self.old_line)
 
 
-class AnnotationGeometryChange(QUndoCommand):
-    def __init__(self, scheme, annotation, old, new, parent=None):
+class AnnotationGeometryChange(UndoCommand):
+    def __init__(
+            self,
+            scheme,  # type: Scheme
+            annotation,  # type: BaseSchemeAnnotation
+            old,  # type: Any
+            new,  # type: Any
+            parent=None  # type: Optional[UndoCommand]
+    ):  # type: (...) -> None
         super().__init__("Change Annotation Geometry", parent)
         self.scheme = scheme
         self.annotation = annotation
@@ -170,14 +264,15 @@ class AnnotationGeometryChange(QUndoCommand):
         self.new = new
 
     def redo(self):
-        self.annotation.geometry = self.new
+        self.annotation.geometry = self.new  # type: ignore
 
     def undo(self):
-        self.annotation.geometry = self.old
+        self.annotation.geometry = self.old  # type: ignore
 
 
-class RenameNodeCommand(QUndoCommand):
+class RenameNodeCommand(UndoCommand):
     def __init__(self, scheme, node, old_name, new_name, parent=None):
+        # type: (Scheme, SchemeNode, str, str, Optional[UndoCommand]) -> None
         super().__init__("Rename", parent)
         self.scheme = scheme
         self.node = node
@@ -191,10 +286,17 @@ class RenameNodeCommand(QUndoCommand):
         self.node.set_title(self.old_name)
 
 
-class TextChangeCommand(QUndoCommand):
-    def __init__(self, scheme, annotation,
-                 old_content, old_content_type,
-                 new_content, new_content_type, parent=None):
+class TextChangeCommand(UndoCommand):
+    def __init__(
+            self,
+            scheme,       # type: Scheme
+            annotation,   # type: SchemeTextAnnotation
+            old_content,  # type: str
+            old_content_type,  # type: str
+            new_content,  # type: str
+            new_content_type,  # type: str
+            parent=None   # type: Optional[UndoCommand]
+    ):  # type: (...) -> None
         super().__init__("Change text", parent)
         self.scheme = scheme
         self.annotation = annotation
@@ -210,8 +312,15 @@ class TextChangeCommand(QUndoCommand):
         self.annotation.set_content(self.old_content, self.old_content_type)
 
 
-class SetAttrCommand(QUndoCommand):
-    def __init__(self, obj, attrname, newvalue, name=None, parent=None):
+class SetAttrCommand(UndoCommand):
+    def __init__(
+            self,
+            obj,         # type: Any
+            attrname,    # type: str
+            newvalue,    # type: Any
+            name=None,   # type: Optional[str]
+            parent=None  # type: Optional[UndoCommand]
+    ):  # type: (...) -> None
         if name is None:
             name = "Set %r" % attrname
         super().__init__(name, parent)
@@ -227,7 +336,31 @@ class SetAttrCommand(QUndoCommand):
         setattr(self.obj, self.attrname, self.oldvalue)
 
 
-class SimpleUndoCommand(QUndoCommand):
+class SetWindowGroupPresets(UndoCommand):
+    def __init__(
+            self,
+            scheme: 'Scheme',
+            presets: List['Scheme.WindowGroup'],
+            parent: Optional[UndoCommand] = None,
+            **kwargs
+    ) -> None:
+        text = kwargs.pop("text", "Set Window Presets")
+        super().__init__(text, parent, **kwargs)
+        self.scheme = scheme
+        self.presets = presets
+        self.__undo_presets = None
+
+    def redo(self):
+        presets = self.scheme.window_group_presets()
+        self.scheme.set_window_group_presets(self.presets)
+        self.__undo_presets = presets
+
+    def undo(self):
+        self.scheme.set_window_group_presets(self.__undo_presets)
+        self.__undo_presets = None
+
+
+class SimpleUndoCommand(UndoCommand):
     """
     Simple undo/redo command specified by callable function pair.
     Parameters
@@ -237,12 +370,17 @@ class SimpleUndoCommand(QUndoCommand):
     undo : Callable[[], None]
         A function expressing a undo action.
     text : str
-        The command's text (see `QUndoCommand.setText`)
-    parent : Optional[QUndoCommand]
+        The command's text (see `UndoCommand.setText`)
+    parent : Optional[UndoCommand]
     """
 
-    def __init__(self, redo, undo, text, parent=None):
-        # type: (Callable[[], None], Callable[[], None], ...) -> None
+    def __init__(
+            self,
+            redo,  # type: Callable[[], None]
+            undo,  # type: Callable[[], None]
+            text,  # type: str
+            parent=None  # type: Optional[UndoCommand]
+    ):  # type: (...) -> None
         super().__init__(text, parent)
         self._redo = redo
         self._undo = undo

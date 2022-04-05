@@ -9,7 +9,9 @@ import logging
 import warnings
 
 from distutils.version import LooseVersion
-from typing import Dict, Optional, Tuple, List, Union, Iterable
+import typing
+
+from typing import Dict, Optional, Tuple, List, Union, Iterable, Any
 
 import pkg_resources
 
@@ -18,10 +20,16 @@ from AnyQt.QtGui import (
 )
 
 from AnyQt.QtCore import (
-    Qt, QCoreApplication, QPoint, QRect, QSettings, QStandardPaths
+    Qt, QCoreApplication, QPoint, QRect, QSettings, QStandardPaths, QEvent
 )
 
+from .gui.utils import windows_set_current_process_app_user_model_id
 from .utils.settings import Settings, config_slot
+
+if typing.TYPE_CHECKING:
+    import requests
+    from .scheme import Scheme
+    T = typing.TypeVar("T")
 
 EntryPoint = pkg_resources.EntryPoint
 Distribution = pkg_resources.Distribution
@@ -51,22 +59,46 @@ def standard_location(type):
     return QStandardPaths.writableLocation(type)
 
 
-standard_location.DesktopLocation = QStandardPaths.DesktopLocation
-standard_location.DataLocation = QStandardPaths.DataLocation
-standard_location.CacheLocation = QStandardPaths.CacheLocation
-standard_location.DocumentsLocation = QStandardPaths.DocumentsLocation
+standard_location.DesktopLocation = QStandardPaths.DesktopLocation      # type: ignore
+standard_location.DataLocation = QStandardPaths.AppLocalDataLocation    # type: ignore
+standard_location.CacheLocation = QStandardPaths.CacheLocation          # type: ignore
+standard_location.DocumentsLocation = QStandardPaths.DocumentsLocation  # type: ignore
 
 
 class Config:
-    OrganizationDomain = ...  # type: str
-    ApplicationName = ...     # type: str
-    ApplicationVersion = ...  # type: str
+    """
+    Application configuration.
+    """
+    #: Organization domain
+    OrganizationDomain = ""  # type: str
+    #: The application name
+    ApplicationName = ""     # type: str
+    #: Version
+    ApplicationVersion = ""  # type: str
+    #: AppUserModelID as used on windows for grouping in the task bar
+    #: (https://docs.microsoft.com/en-us/windows/win32/shell/appids).
+    #: This ensures the program does not group with other Python programs
+    #: and gets its own task icon.
+    AppUserModelID = None    # type: Optional[str]
 
     def init(self):
+        """
+        Initialize the QCoreApplication.organizationDomain, applicationName,
+        applicationVersion and the default settings format.
+
+        Should only be run once at application startup.
+        """
         QCoreApplication.setOrganizationDomain(self.OrganizationDomain)
         QCoreApplication.setApplicationName(self.ApplicationName)
         QCoreApplication.setApplicationVersion(self.ApplicationVersion)
         QSettings.setDefaultFormat(QSettings.IniFormat)
+        app = QCoreApplication.instance()
+
+        if self.AppUserModelID:
+            windows_set_current_process_app_user_model_id(self.AppUserModelID)
+
+        if app is not None:
+            QCoreApplication.sendEvent(app, QEvent(QEvent.PolishRequest))
 
     def application_icon(self):
         # type: () -> QIcon
@@ -107,8 +139,10 @@ class Config:
     def addon_pypi_search_spec(self):
         return {}
 
-    def addon_defaults_list(self):
-        # type: () -> List[Dict[str, Union[str, list, dict, int, float]]]
+    def addon_defaults_list(
+            self,
+            session=None  # type: Optional[requests.Session]
+    ):  # type: (...) -> List[Dict[str, Union[str, list, dict, int, float]]]
         """
         Return a list of default add-ons.
 
@@ -128,7 +162,7 @@ class Config:
         """
         Return a list of core packages.
 
-        List of packages that are core of the product. Most importantly,
+        List of packages that are core of the application. Most importantly,
         if they themselves define add-on/plugin entry points they must
         not be 'uninstalled' via a package manager, they can only be
         updated.
@@ -143,12 +177,19 @@ class Config:
 
     def examples_entry_points(self):
         # type: () -> Iterable[EntryPoint]
+        """
+        Return an iterator over entry points defining example/preset workflows.
+        """
         return iter(())
 
     def widget_discovery(self, *args, **kwargs):
         raise NotImplementedError
 
-    def workflow_constructor(self):
+    def workflow_constructor(self, *args, **kwargs):
+        # type: (Any, Any) -> Scheme
+        """
+        The default workflow constructor.
+        """
         raise NotImplementedError
 
     #: Standard application urls. If defined to a valid url appropriate actions
@@ -167,18 +208,11 @@ class Config:
     }  # type: Dict[str, Optional[str]]
 
 
-class default(Config):
+class Default(Config):
+
     OrganizationDomain = "biolab.si"
     ApplicationName = "Orange Canvas Core"
     ApplicationVersion = __version__
-
-    @classmethod
-    def init(cls):
-        QCoreApplication.setOrganizationDomain(cls.OrganizationDomain)
-        QCoreApplication.setApplicationName(cls.ApplicationName)
-        QCoreApplication.setApplicationVersion(cls.ApplicationVersion)
-
-        QSettings.setDefaultFormat(QSettings.IniFormat)
 
     @staticmethod
     def application_icon():
@@ -254,8 +288,7 @@ class default(Config):
         return dict(ADDON_PYPI_SEARCH_SPEC)
 
     @staticmethod
-    def addon_defaults_list():
-        # type: () -> List[Dict[str, Union[str, list, dict, int, float]]]
+    def addon_defaults_list(session=None):
         """
         Return a list of default add-ons.
 
@@ -289,7 +322,6 @@ class default(Config):
         """
         return ["orange-canvas-core >= 0.0, < 0.1a"]
 
-
     @staticmethod
     def examples_entry_points():
         return pkg_resources.iter_entry_points(EXAMPLE_WORKFLOWS_ENTRY)
@@ -304,20 +336,8 @@ class default(Config):
         from . import scheme
         return scheme.Scheme(*args, **kwargs)
 
-    #: Standard application urls. If defined to a valid url appropriate actions
-    #: are defined in various contexts
-    APPLICATION_URLS = {
-        #: Submit a bug report action in the Help menu
-        "Bug Report": None,
-        #: A url quick tour/getting started url
-        "Quick Start": None,
-        #: An url to the full documentation
-        "Documentation": None,
-        #: Video screencast/tutorials
-        "Screencasts": None,
-        #: Used for 'Submit Feedback' action in the help menu
-        "Feedback": None,
-    }  # type: Dict[str, Optional[str]]
+
+default = Default()
 
 
 def init():
@@ -336,20 +356,23 @@ def init():
     init = lambda: None
 
 
-rc = {}
+rc = {}  # type: ignore
 
 
 spec = \
     [("startup/show-splash-screen", bool, True,
-      "Show splash screen at startup"),
+      "Show splash screen on startup"),
 
      ("startup/show-welcome-screen", bool, True,
-      "Show Welcome screen at startup"),
+      "Show Welcome screen on startup"),
+
+     ("startup/load-crashed-workflows", bool, True,
+      "Load crashed scratch workflows on startup"),
 
      ("stylesheet", str, "orange",
       "QSS stylesheet to use"),
 
-     ("schemeinfo/show-at-new-scheme", bool, True,
+     ("schemeinfo/show-at-new-scheme", bool, False,
       "Show Workflow Properties when creating a new Workflow"),
 
      ("mainwindow/scheme-margins-enabled", bool, False,
@@ -358,7 +381,7 @@ spec = \
      ("mainwindow/show-scheme-shadow", bool, True,
       "Show shadow around the workflow view"),
 
-     ("mainwindow/toolbox-dock-exclusive", bool, True,
+     ("mainwindow/toolbox-dock-exclusive", bool, False,
       "Should the toolbox show only one expanded category at the time"),
 
      ("mainwindow/toolbox-dock-floatable", bool, False,
@@ -401,6 +424,9 @@ spec = \
      ("quickmenu/trigger-on-any-key", bool, False,
       "Show quick menu on double click."),
 
+     ("quickmenu/show-categories", bool, False,
+      "Show categories in quick menu."),
+
      ("logging/level", int, 1, "Logging level"),
 
      ("logging/show-on-error", bool, True, "Show log window on error"),
@@ -410,7 +436,7 @@ spec = \
      ("help/open-in-external-browser", bool, False,
       "Open help in an external browser"),
 
-     ("add-ons/allow-conda-experimental", bool, False,
+     ("add-ons/allow-conda", bool, True,
       "Install add-ons with conda"),
 
      ("add-ons/pip-install-arguments", str, '',
@@ -423,6 +449,27 @@ spec = \
 
 
 spec = [config_slot(*t) for t in spec]
+
+
+def register_setting(key, type, default, doc=""):
+    # type: (str, typing.Type[T], T, str) -> None
+    """
+    Register an application setting.
+
+    This only affects the `Settings` instance as returned by `settings`.
+
+    Parameters
+    ----------
+    key : str
+        The setting key path
+    type : Type[T]
+        Type of the setting. One of `str`, `bool` or `int`
+    default : T
+        Default value for setting.
+    doc : str
+        Setting description string.
+    """
+    spec.append(config_slot(key, type, default, doc))
 
 
 def settings():
@@ -438,7 +485,7 @@ def data_dir():
     does not yet exists then create it.
     """
     init()
-    datadir = QStandardPaths.writableLocation(QStandardPaths.DataLocation)
+    datadir = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
     version = QCoreApplication.applicationVersion()
     datadir = os.path.join(datadir, version)
     if not os.path.isdir(datadir):
@@ -532,6 +579,7 @@ def widget_discovery(*args, **kwargs):
 
 
 def workflow_constructor(*args, **kwargs):
+    # type: (Any, Any) -> Scheme
     return default.workflow_constructor(*args, **kwargs)
 
 

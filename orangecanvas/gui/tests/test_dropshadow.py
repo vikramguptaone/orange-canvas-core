@@ -2,14 +2,15 @@
 Tests for DropShadowFrame wiget.
 
 """
+import math
 
 from AnyQt.QtWidgets import (
     QMainWindow, QWidget, QListView, QTextEdit, QHBoxLayout, QToolBar,
     QVBoxLayout
 )
 from AnyQt.QtGui import QColor
+from AnyQt.QtCore import Qt, QPoint, QPropertyAnimation, QVariantAnimation
 
-from AnyQt.QtCore import Qt, QTimer, QPropertyAnimation
 from .. import dropshadow
 
 from .. import test
@@ -45,7 +46,7 @@ class TestDropShadow(test.QAppTestCase):
             duration=3000
         )
         ranim.start()
-        self.app.exec_()
+        self.qWait()
 
     def test1(self):
         class FT(QToolBar):
@@ -68,8 +69,8 @@ class TestDropShadow(test.QAppTestCase):
         c.layout().addWidget(te)
         w.setCentralWidget(c)
         f.setWidget(te)
-        f.radius = 15
-        f.color = QColor(Qt.blue)
+        f.setRadius(15)
+        f.setColor(Qt.blue)
         w.show()
 
         canim = QPropertyAnimation(
@@ -83,7 +84,27 @@ class TestDropShadow(test.QAppTestCase):
             duration=3000
         )
         ranim.start()
-        self.app.exec_()
+        self.qWait()
+
+    def test_offset(self):
+        w = QWidget()
+        w.setLayout(QHBoxLayout())
+        w.setContentsMargins(30, 30, 30, 30)
+        ww = QTextEdit()
+        w.layout().addWidget(ww)
+        f = dropshadow.DropShadowFrame(radius=20)
+        f.setWidget(ww)
+        oanim = QVariantAnimation(
+            f, startValue=0.0, endValue=2 * math.pi, loopCount=-1,
+            duration=2000,
+        )
+        @oanim.valueChanged.connect
+        def _(value):
+            f.setOffset(QPoint(int(15 * math.cos(value)),
+                               int(15 * math.sin(value))))
+        oanim.start()
+        w.show()
+        self.qWait()
 
 
 if __name__ == "__main__":

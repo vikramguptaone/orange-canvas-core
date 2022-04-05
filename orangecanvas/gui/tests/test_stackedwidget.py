@@ -15,8 +15,7 @@ class TestStackedWidget(test.QAppTestCase):
         layout = QVBoxLayout()
         window.setLayout(layout)
 
-        stack = stackedwidget.AnimatedStackedWidget()
-        stack.transitionFinished.connect(self.app.exit)
+        stack = stackedwidget.AnimatedStackedWidget(animationEnabled=False)
 
         layout.addStretch(2)
         layout.addWidget(stack)
@@ -55,8 +54,7 @@ class TestStackedWidget(test.QAppTestCase):
                                  widgets())
 
         stack.setCurrentIndex(1)
-        # wait until animation finished
-        self.app.exec_()
+        self.qWait()
 
         self.assertEqual(stack.currentIndex(), 1)
 
@@ -67,13 +65,13 @@ class TestStackedWidget(test.QAppTestCase):
         self.assertSequenceEqual([widget1, widget2, widget3],
                                  widgets())
 
-        stack.transitionFinished.disconnect(self.app.exit)
-
         def toogle():
             idx = stack.currentIndex()
             stack.setCurrentIndex((idx + 1) % stack.count())
 
-        timer = QTimer(stack, interval=1000)
+        timer = QTimer(stack, interval=100)
         timer.timeout.connect(toogle)
         timer.start()
-        self.app.exec_()
+        self.qWait(200)
+        timer.stop()
+        window.deleteLater()

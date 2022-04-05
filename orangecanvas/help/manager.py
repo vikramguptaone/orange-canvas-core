@@ -1,62 +1,66 @@
 """
 
 """
-import sys
 import os
 import string
 import itertools
 import logging
-import email
 import urllib.parse
-
-from distutils.version import StrictVersion
-from operator import itemgetter
+import warnings
 from sysconfig import get_path
+
+import typing
+from typing import Dict, Optional, List, Tuple, Union, Callable, Sequence
 
 import pkg_resources
 
+from AnyQt.QtCore import QObject, QUrl, QDir
+
+from ..utils.pkgmeta import get_dist_url, is_develop_egg
 from . import provider
 
-from AnyQt.QtCore import QObject, QUrl, QDir
+if typing.TYPE_CHECKING:
+    from ..registry import WidgetRegistry, WidgetDescription
+    Distribution = pkg_resources.Distribution
+    EntryPoint = pkg_resources.EntryPoint
 
 log = logging.getLogger(__name__)
 
 
 class HelpManager(QObject):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._registry = None
-        self._initialized = False
-        self._providers = {}
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self._registry = None  # type: Optional[WidgetRegistry]
+        self._providers = {}  # type: Dict[str, provider.HelpProvider]
 
     def set_registry(self, registry):
+        # type: (Optional[WidgetRegistry]) -> None
         """
-        Set the widget registry for which the manager should
-        provide help.
-
+        Set the widget registry for which the manager should provide help.
         """
         if self._registry is not registry:
             self._registry = registry
-            self._initialized = False
-            self.initialize()
 
     def registry(self):
+        # type: () -> Optional[WidgetRegistry]
         """
         Return the previously set with set_registry.
         """
         return self._registry
 
-    def initialize(self):
-        if self._initialized:
-            return
+    def initialize(self) -> None:
+        warnings.warn(
+            "`HelpManager.initialize` is deprecated and does nothing.",
+            DeprecationWarning, stacklevel=2
+        )
+        return
 
-        reg = self._registry
-        all_projects = set(desc.project_name for desc in reg.widgets()
-                           if desc.project_name is not None)
-
-        providers = []
-        for project in set(all_projects) - set(self._providers.keys()):
-            provider = None
+    def get_provider(self, project: str) -> Optional[provider.HelpProvider]:
+        """
+        Return a `HelpProvider` for the `project` name.
+        """
+        provider = self._providers.get(project, None)
+        if provider is None:
             try:
                 dist = pkg_resources.get_distribution(project)
             except pkg_resources.ResolutionError:
@@ -64,33 +68,33 @@ class HelpManager(QObject):
             else:
                 try:
                     provider = get_help_provider_for_distribution(dist)
-                except Exception:
+                except Exception:  # noqa
                     log.exception("Error while initializing help "
                                   "provider for %r", project)
 
-            if provider:
-                providers.append((project, provider))
-                provider.setParent(self)
-
-        self._providers.update(dict(providers))
-        self._initialized = True
+        if provider:
+            self._providers[project] = provider
+        return provider
 
     def get_help(self, url):
+        # type: (QUrl) -> QUrl
         """
         """
-        self.initialize()
         if url.scheme() == "help" and url.authority() == "search":
             return self.search(qurl_query_items(url))
         else:
             return url
 
     def description_by_id(self, desc_id):
+        # type: (str) -> WidgetDescription
         reg = self._registry
-        return get_by_id(reg, desc_id)
+        if reg is not None:
+            return get_by_id(reg, desc_id)
+        else:
+            raise RuntimeError("No registry set. Cannot resolve")
 
     def search(self, query):
-        self.initialize()
-
+        # type: (Union[QUrl, Dict[str, str], Sequence[Tuple[str, str]]]) -> QUrl
         if isinstance(query, QUrl):
             query = qurl_query_items(query)
 
@@ -100,16 +104,33 @@ class HelpManager(QObject):
 
         provider = None
         if desc.project_name:
-            provider = self._providers.get(desc.project_name)
+            provider = self.get_provider(desc.project_name)
 
-        # TODO: Ensure initialization of the provider
-        if provider:
+        if provider is not None:
             return provider.search(desc)
+        else:
+            raise KeyError(desc_id)
+
+    async def search_async(self, query, timeout=2):
+        if isinstance(query, QUrl):
+            query = qurl_query_items(query)
+
+        query = dict(query)
+        desc_id = query["id"]
+        desc = self.description_by_id(desc_id)
+
+        provider = None
+        if desc.project_name:
+            provider = self.get_provider(desc.project_name)
+
+        if provider is not None:
+            return await provider.search_async(desc, timeout=timeout)
         else:
             raise KeyError(desc_id)
 
 
 def get_by_id(registry, descriptor_id):
+    # type: (WidgetRegistry, str) -> WidgetDescription
     for desc in registry.widgets():
         if desc.qualified_name == descriptor_id:
             return desc
@@ -117,139 +138,15 @@ def get_by_id(registry, descriptor_id):
     raise KeyError(descriptor_id)
 
 
-def qurl_query_items(url):
-    items = []
-    for key, value in url.queryItems():
-        items.append((key, value))
-    return items
-
-
-def qurl_query_items(url):
+def qurl_query_items(url: QUrl) -> List[Tuple[str, str]]:
     if not url.hasQuery():
         return []
     querystr = url.query()
     return urllib.parse.parse_qsl(querystr)
 
 
-def get_help_provider_for_description(desc):
-    if desc.project_name:
-        dist = pkg_resources.get_distribution(desc.project_name)
-        return get_help_provider_for_distribution(dist)
-
-
-def is_develop_egg(dist):
-    """
-    Is the distribution installed in development mode (setup.py develop)
-    """
-    meta_provider = dist._provider
-    egg_info_dir = os.path.dirname(meta_provider.egg_info)
-    egg_name = pkg_resources.to_filename(dist.project_name)
-    return meta_provider.egg_info.endswith(egg_name + ".egg-info") \
-           and os.path.exists(os.path.join(egg_info_dir, "setup.py"))
-
-
-def left_trim_lines(lines):
-    """
-    Remove all unnecessary leading space from lines.
-    """
-    lines_striped = zip(lines[1:], map(str.lstrip, lines[1:]))
-    lines_striped = filter(itemgetter(1), lines_striped)
-    indent = min([len(line) - len(striped) \
-                  for line, striped in lines_striped] + [sys.maxsize])
-
-    if indent < sys.maxsize:
-        return [line[indent:] for line in lines]
-    else:
-        return list(lines)
-
-
-def trim_trailing_lines(lines):
-    """
-    Trim trailing blank lines.
-    """
-    lines = list(lines)
-    while lines and not lines[-1]:
-        lines.pop(-1)
-    return lines
-
-
-def trim_leading_lines(lines):
-    """
-    Trim leading blank lines.
-    """
-    lines = list(lines)
-    while lines and not lines[0]:
-        lines.pop(0)
-    return lines
-
-
-def trim(string):
-    """
-    Trim a string in PEP-256 compatible way
-    """
-    lines = string.expandtabs().splitlines()
-
-    lines = list(map(str.lstrip, lines[:1])) + left_trim_lines(lines[1:])
-
-    return  "\n".join(trim_leading_lines(trim_trailing_lines(lines)))
-
-
-# Fields allowing multiple use (from PEP-0345)
-MULTIPLE_KEYS = ["Platform", "Supported-Platform", "Classifier",
-                 "Requires-Dist", "Provides-Dist", "Obsoletes-Dist",
-                 "Project-URL"]
-
-
-def parse_meta(contents):
-    message = email.message_from_string(contents)
-    meta = {}
-    for key in set(message.keys()):
-        if key in MULTIPLE_KEYS:
-            meta[key] = message.get_all(key)
-        else:
-            meta[key] = message.get(key)
-
-    version = StrictVersion(meta["Metadata-Version"])
-
-    if version >= StrictVersion("1.3") and "Description" not in meta:
-        desc = message.get_payload()
-        if desc:
-            meta["Description"] = desc
-    return meta
-
-
-def get_meta_entry(dist, name):
-    """
-    Get the contents of the named entry from the distributions PKG-INFO file
-    """
-    meta = get_dist_meta(dist)
-    return meta.get(name)
-
-
-def get_dist_url(dist):
-    """
-    Return the 'url' of the distribution (as passed to setup function)
-    """
-    return get_meta_entry(dist, "Home-page")
-
-
-def get_dist_meta(dist):
-    if dist.has_metadata("PKG-INFO"):
-        # egg-info
-        contents = dist.get_metadata("PKG-INFO")
-    elif dist.has_metadata("METADATA"):
-        # dist-info
-        contents = dist.get_metadata("METADATA")
-    else:
-        contents = None
-
-    if contents is not None:
-        return parse_meta(contents)
-    else:
-        return {}
-
-
 def _replacements_for_dist(dist):
+    # type: (Distribution) -> Dict[str, str]
     replacements = {"PROJECT_NAME": dist.project_name,
                     "PROJECT_NAME_LOWER": dist.project_name.lower(),
                     "PROJECT_VERSION": dist.version,
@@ -266,6 +163,7 @@ def _replacements_for_dist(dist):
 
 
 def qurl_from_path(urlpath):
+    # type: (str) -> QUrl
     if QDir(urlpath).isAbsolute():
         # deal with absolute paths including windows drive letters
         return QUrl.fromLocalFile(urlpath)
@@ -273,8 +171,12 @@ def qurl_from_path(urlpath):
 
 
 def create_intersphinx_provider(entry_point):
+    # type: (EntryPoint) -> Optional[provider.IntersphinxHelpProvider]
     locations = entry_point.resolve()
-    replacements = _replacements_for_dist(entry_point.dist)
+    if entry_point.dist is not None:
+        replacements = _replacements_for_dist(entry_point.dist)
+    else:
+        replacements = {}
 
     formatter = string.Formatter()
 
@@ -288,8 +190,6 @@ def create_intersphinx_provider(entry_point):
         fields = {name for _, name, _, _ in format_iter if name}
 
         if not set(fields) <= set(replacements.keys()):
-            log.warning("Invalid replacement fields %s",
-                        set(fields) - set(replacements.keys()))
             continue
 
         target = formatter.format(target, **replacements)
@@ -320,8 +220,12 @@ def create_intersphinx_provider(entry_point):
 
 
 def create_html_provider(entry_point):
+    # type: (EntryPoint) -> Optional[provider.SimpleHelpProvider]
     locations = entry_point.resolve()
-    replacements = _replacements_for_dist(entry_point.dist)
+    if entry_point.dist is not None:
+        replacements = _replacements_for_dist(entry_point.dist)
+    else:
+        replacements = {}
 
     formatter = string.Formatter()
 
@@ -331,8 +235,6 @@ def create_html_provider(entry_point):
         fields = {name for _, name, _, _ in format_iter if name}
 
         if not set(fields) <= set(replacements.keys()):
-            log.warning("Invalid replacement fields %s",
-                        set(fields) - set(replacements.keys()))
             continue
         target = formatter.format(target, **replacements)
 
@@ -353,8 +255,12 @@ def create_html_provider(entry_point):
 
 
 def create_html_inventory_provider(entry_point):
+    # type: (EntryPoint) -> Optional[provider.HtmlIndexProvider]
     locations = entry_point.resolve()
-    replacements = _replacements_for_dist(entry_point.dist)
+    if entry_point.dist is not None:
+        replacements = _replacements_for_dist(entry_point.dist)
+    else:
+        replacements = {}
 
     formatter = string.Formatter()
 
@@ -367,10 +273,7 @@ def create_html_inventory_provider(entry_point):
         fields = {name for _, name, _, _ in format_iter if name}
 
         if not set(fields) <= set(replacements.keys()):
-            log.warning("Invalid replacement fields %s",
-                        set(fields) - set(replacements.keys()))
             continue
-
         target = formatter.format(target, **replacements)
 
         targeturl = qurl_from_path(target)
@@ -391,15 +294,42 @@ def create_html_inventory_provider(entry_point):
 
     return None
 
+
 _providers = {
     "intersphinx": create_intersphinx_provider,
     "html-simple": create_html_provider,
     "html-index": create_html_inventory_provider,
-}
+}  # type: Dict[str, Callable[[EntryPoint], Optional[provider.HelpProvider]]]
+
+_providers_cache = {}  # type: Dict[str, provider.HelpProvider]
 
 
 def get_help_provider_for_distribution(dist):
-    entry_points = dist.get_entry_map().get("orange.canvas.help", {})
+    # type: (pkg_resources.Distribution) -> Optional[provider.HelpProvider]
+    """
+    Return a HelpProvider for the distribution.
+
+    A 'orange.canvas.help' entry point is used to lookup one of the known
+    provider classes, and the corresponding constructor factory is called
+    with the entry point as the only parameter.
+
+    Parameters
+    ----------
+    dist : Distribution
+
+    Returns
+    -------
+    provider: Optional[provider.HelpProvider]
+    """
+    if dist.project_name in _providers_cache:
+        return _providers_cache[dist.project_name]
+
+    eps = dist.get_entry_map()
+    entry_points = eps.get("orange.canvas.help", {})
+    if not entry_points:
+        # alternative name
+        entry_points = eps.get("orangecanvas.help", {})
+
     provider = None
     for name, entry_point in entry_points.items():
         create = _providers.get(name, None)
@@ -416,4 +346,6 @@ def get_help_provider_for_distribution(dist):
                          type(provider), dist)
                 break
 
+    if provider is not None:
+        _providers_cache[dist.project_name] = provider
     return provider

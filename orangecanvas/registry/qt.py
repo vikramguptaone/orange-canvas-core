@@ -3,6 +3,9 @@ Qt Model classes for widget registry.
 
 """
 import bisect
+import warnings
+
+from typing import Union
 
 from xml.sax.saxutils import escape
 from urllib.parse import urlencode
@@ -12,6 +15,7 @@ from AnyQt.QtGui import QStandardItemModel, QStandardItem, QColor, QBrush
 from AnyQt.QtCore import QObject, Qt
 from AnyQt.QtCore import pyqtSignal as Signal
 
+from ..utils import type_str
 from .discovery import WidgetDiscovery
 from .description import WidgetDescription, CategoryDescription
 from .base import WidgetRegistry
@@ -50,6 +54,21 @@ class QtWidgetDiscovery(QObject, WidgetDiscovery):
 
     def handle_category(self, description):
         self.found_category.emit(description)
+
+
+class QtRegistryHandler(QObject, WidgetDiscovery.RegistryHandler):
+    # Found a widget with description
+    found_widget = Signal(WidgetDescription)
+    # Found a category with description
+    found_category = Signal(CategoryDescription)
+
+    def handle_category(self, category):
+        super().handle_category(category)
+        self.found_category.emit(category)
+
+    def handle_widget(self, desc):
+        super().handle_widget(desc)
+        self.found_widget.emit(desc)
 
 
 class QtWidgetRegistry(QObject, WidgetRegistry):
@@ -111,6 +130,7 @@ class QtWidgetRegistry(QObject, WidgetRegistry):
                 cat_item.insertRow(j, widget_item)
 
     def model(self):
+        # type: () -> QStandardItemModel
         """
         Return the widget descriptions in a Qt Item Model instance
         (QStandardItemModel).
@@ -121,17 +141,19 @@ class QtWidgetRegistry(QObject, WidgetRegistry):
         return self.__item_model
 
     def item_for_widget(self, widget):
+        # type: (Union[str, WidgetDescription]) -> QStandardItem
         """Return the QStandardItem for the widget.
         """
         if isinstance(widget, str):
             widget = self.widget(widget)
-        cat = self.category(widget.category)
+        cat = self.category(widget.category or "Unspecified")
         cat_ind = self.categories().index(cat)
         cat_item = self.model().item(cat_ind)
         widget_ind = self.widgets(cat).index(widget)
         return cat_item.child(widget_ind)
 
     def action_for_widget(self, widget):
+        # type: (Union[str, WidgetDescription]) -> QAction
         """
         Return the QAction instance for the widget (can be a string or
         a WidgetDescription instance).
@@ -141,6 +163,7 @@ class QtWidgetRegistry(QObject, WidgetRegistry):
         return item.data(self.WIDGET_ACTION_ROLE)
 
     def create_action_for_item(self, item):
+        # type: (QStandardItem) -> QAction
         """
         Create a QAction instance for the widget description item.
         """
@@ -148,21 +171,17 @@ class QtWidgetRegistry(QObject, WidgetRegistry):
         tooltip = item.toolTip()
         whatsThis = item.whatsThis()
         icon = item.icon()
-        if icon:
-            action = QAction(icon, name, self, toolTip=tooltip,
-                             whatsThis=whatsThis,
-                             statusTip=name)
-        else:
-            action = QAction(name, self, toolTip=tooltip,
-                             whatsThis=whatsThis,
-                             statusTip=name)
-
+        action = QAction(
+            icon, name, self, toolTip=tooltip, whatsThis=whatsThis,
+            statusTip=name
+        )
         widget_desc = item.data(self.WIDGET_DESC_ROLE)
         action.setData(widget_desc)
         action.setProperty("item", item)
         return action
 
     def _insert_category(self, desc):
+        # type: (CategoryDescription) -> None
         """
         Override to update the item model and emit the signals.
         """
@@ -178,10 +197,11 @@ class QtWidgetRegistry(QObject, WidgetRegistry):
         self.category_added.emit(desc.name, desc)
 
     def _insert_widget(self, category, desc):
+        # type: (CategoryDescription, WidgetDescription) -> None
         """
         Override to update the item model and emit the signals.
         """
-        assert(isinstance(category, CategoryDescription))
+        assert isinstance(category, CategoryDescription)
         categories = self.categories()
         cat_i = categories.index(category)
         _, widgets = self._categories_dict[category.name]
@@ -198,6 +218,7 @@ class QtWidgetRegistry(QObject, WidgetRegistry):
         self.widget_added.emit(category.name, desc.name, desc)
 
     def _cat_desc_to_std_item(self, desc):
+        # type: (CategoryDescription) -> QStandardItem
         """
         Create a QStandardItem for the category description.
         """
@@ -230,6 +251,7 @@ class QtWidgetRegistry(QObject, WidgetRegistry):
         return item
 
     def _widget_desc_to_std_item(self, desc, category):
+        # type: (WidgetDescription, CategoryDescription) -> QStandardItem
         """
         Create a QStandardItem for the widget description.
         """
@@ -287,6 +309,7 @@ TOOLTIP_TEMPLATE = """\
 
 
 def tooltip_helper(desc):
+    # type: (WidgetDescription) -> str
     """Widget tooltip construction helper.
 
     """
@@ -302,15 +325,9 @@ def tooltip_helper(desc):
 
     inputs_fmt = "<li>{name} ({class_name})</li>"
 
-    def type_str(type_name):
-        if type_name.startswith("__builtin__."):
-            return type_name[len("__builtin__."):]
-        else:
-            return type_name
-
     if desc.inputs:
         inputs = "".join(inputs_fmt.format(name=inp.name,
-                                           class_name=type_str(inp.type))
+                                           class_name=type_str(inp.types))
                          for inp in desc.inputs)
         tooltip.append("Inputs:<ul>{0}</ul>".format(inputs))
     else:
@@ -318,7 +335,7 @@ def tooltip_helper(desc):
 
     if desc.outputs:
         outputs = "".join(inputs_fmt.format(name=out.name,
-                                            class_name=type_str(out.type))
+                                            class_name=type_str(out.types))
                           for out in desc.outputs)
         tooltip.append("Outputs:<ul>{0}</ul>".format(outputs))
     else:
@@ -328,6 +345,7 @@ def tooltip_helper(desc):
 
 
 def whats_this_helper(desc, include_more_link=False):
+    # type: (WidgetDescription, bool) -> str
     """
     A `What's this` text construction helper. If `include_more_link` is
     True then the text will include a `more...` link.
@@ -357,11 +375,10 @@ def whats_this_helper(desc, include_more_link=False):
 
 
 def run_discovery(entry_points_iter, cached=False):
-    """
-    Run the default discovery and return an instance of
-    :class:`QtWidgetRegistry`.
-
-    """
+    warnings.warn(
+        "run_discovery is deprecated and will be removed.",
+        FutureWarning, stacklevel=2
+    )
     reg_cache = {}
     if cached:
         reg_cache = cache.registry_cache()

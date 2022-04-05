@@ -5,9 +5,12 @@ from datetime import datetime
 from threading import current_thread
 
 from AnyQt.QtCore import Qt, QThread, QTimer, QCoreApplication, QEvent
+from AnyQt.QtGui import QTextCharFormat, QColor
+
 from ...gui.test import QAppTestCase
 
-from ..outputview import OutputView, TextStream, ExceptHook
+from ..outputview import OutputView, TextStream, ExceptHook, \
+    TerminalTextDocument
 
 
 class TestOutputView(QAppTestCase):
@@ -38,34 +41,34 @@ class TestOutputView(QAppTestCase):
             text = output.toPlainText()
             self.assertLessEqual(len(text.splitlines()), 5)
 
-        timer = QTimer(output, interval=500)
+        timer = QTimer(output, interval=25)
         timer.timeout.connect(advance)
         timer.start()
-        self.app.exec_()
+        self.qWait(100)
+        timer.stop()
 
-    def test_formated(self):
+    def test_formatted(self):
         output = OutputView()
         output.show()
 
         output.write("A sword day, ")
-        with output.formated(color=Qt.red) as f:
+        with output.formatted(color=Qt.red) as f:
             f.write("a red day...\n")
 
-            with f.formated(color=Qt.green) as f:
+            with f.formatted(color=Qt.green) as f:
                 f.write("Actually sir, orcs bleed green.\n")
 
-        bold = output.formated(weight=100, underline=True)
+        bold = output.formatted(weight=100, underline=True)
         bold.write("Shutup")
-
-        self.app.exec_()
+        self.qWait()
 
     def test_threadsafe(self):
         output = OutputView()
         output.resize(500, 300)
         output.show()
 
-        blue_formater = output.formated(color=Qt.blue)
-        red_formater = output.formated(color=Qt.red)
+        blue_formater = output.formatted(color=Qt.blue)
+        red_formater = output.formatted(color=Qt.red)
 
         correct = []
 
@@ -101,9 +104,7 @@ class TestOutputView(QAppTestCase):
 
         pool = multiprocessing.pool.ThreadPool(100)
         res = pool.map_async(printer, range(10000))
-
-        self.app.exec_()
-
+        self.qWait()
         res.wait()
 
         # force all pending enqueued emits
@@ -113,13 +114,14 @@ class TestOutputView(QAppTestCase):
 
         self.assertTrue(all(correct))
         self.assertEqual(len(correct), 10000)
+        pool.close()
 
     def test_excepthook(self):
         output = OutputView()
         output.resize(500, 300)
         output.show()
 
-        red_formater = output.formated(color=Qt.red)
+        red_formater = output.formatted(color=Qt.red)
 
         red = TextStream()
         red.stream.connect(red_formater.write)
@@ -138,7 +140,26 @@ class TestOutputView(QAppTestCase):
 
         pool = multiprocessing.pool.ThreadPool(10)
         res = pool.map_async(raise_exception, range(100))
-
-        self.app.exec_()
-
+        self.qWait(100)
         res.wait()
+        pool.close()
+
+    def test_clone(self):
+        doc = TerminalTextDocument()
+        writer = TextStream()
+        doc.connectStream(writer)
+        writer.write("A")
+        doc_c = doc.clone()
+        writer.write("B")
+        self.assertEqual(doc.toPlainText(), "AB")
+        self.assertEqual(doc_c.toPlainText(), "AB")
+        writer_err = TextStream()
+        cf = QTextCharFormat()
+        cf.setForeground(QColor(Qt.red))
+        doc_c.connectStream(writer_err, cf)
+        writer_err.write("C")
+        self.assertEqual(doc_c.toPlainText(), "ABC")
+        self.assertEqual(doc.toPlainText(), "AB")
+        doc_c.disconnectStream(writer_err)
+        writer_err.write("D")
+        self.assertEqual(doc_c.toPlainText(), "ABC")

@@ -1,18 +1,18 @@
 """
 Preview item model.
 """
-
+import os
 import logging
 
-from AnyQt.QtWidgets import QApplication, QStyleOption
 from AnyQt.QtGui import (
-    QStandardItemModel, QStandardItem, QIcon, QIconEngine, QPainter, QPixmap
+    QStandardItemModel, QStandardItem, QIcon
 )
-from AnyQt.QtSvg import QSvgRenderer
-# pylint: disable=unused-import
-from AnyQt.QtCore import Qt, QTimer, QRectF, QRect, QSize
+from AnyQt.QtCore import Qt, QTimer
+from AnyQt.QtCore import pyqtSlot as Slot
 
+from ..gui.svgiconengine import SvgIconEngine
 from . import scanner
+
 
 log = logging.getLogger(__name__)
 
@@ -47,39 +47,40 @@ class PreviewModel(QStandardItemModel):
 
     def __init__(self, parent=None, items=None):
         super().__init__(parent)
-
+        self.__preview_index = -1
         if items is not None:
             self.insertColumn(0, items)
 
         self.__timer = QTimer(self)
+        self.__timer.timeout.connect(self.__process_next)
 
     def delayedScanUpdate(self, delay=10):
         """Run a delayed preview item scan update.
         """
-        def iter_update(items):
-            for item in items:
-                try:
-                    scanner.scan_update(item)
-                except Exception:
-                    log.error("An unexpected error occurred while "
-                              "scanning '%s'.", item.text(),
-                              exc_info=True)
-                    item.setEnabled(False)
-                yield
-
-        items = [self.item(i) for i in range(self.rowCount())]
-
-        iter_scan = iter_update(items)
-
-        def process_one():
-            try:
-                next(iter_scan)
-            except StopIteration:
-                self.__timer.timeout.disconnect(process_one)
-                self.__timer.stop()
-
-        self.__timer.timeout.connect(process_one)
+        self.__preview_index = -1
         self.__timer.start(delay)
+        log.debug("delayedScanUpdate: Start")
+
+    @Slot()
+    def __process_next(self):
+        index = self.__preview_index
+        log.debug("delayedScanUpdate: Next %i", index + 1)
+        if not 0 <= index + 1 < self.rowCount():
+            self.__timer.stop()
+            log.debug("delayedScanUpdate: Stop")
+            return
+
+        self.__preview_index = index = index + 1
+
+        assert 0 <= index < self.rowCount()
+        item = self.item(index)
+        if os.path.isfile(item.path()):
+            try:
+                scanner.scan_update(item)
+            except Exception:
+                log.error("An unexpected error occurred while "
+                          "scanning '%s'.", item.text(), exc_info=True)
+                item.setEnabled(False)
 
 
 class PreviewItem(QStandardItem):
@@ -185,52 +186,3 @@ class PreviewItem(QStandardItem):
         self.setData(path, PathRole)
         self.setStatusTip(path)
         self.setToolTip(path)
-
-
-class SvgIconEngine(QIconEngine):
-    def __init__(self, contents):
-        # type: (bytes) -> None
-        super().__init__()
-        self.__contents = contents
-        self.__generator = QSvgRenderer(contents)
-
-    def paint(self, painter, rect, mode, state):
-        # type: (QPainter, QRect, QIcon.Mode, QIcon.State) -> None
-        if self.__generator.isValid():
-            size = rect.size()
-            dpr = 1.0
-            try:
-                dpr = painter.device().devicePixelRatioF()
-            except AttributeError:
-                pass
-            if dpr != 1.0:
-                size = size * dpr
-            painter.drawPixmap(rect, self.pixmap(size, mode, state))
-
-    def pixmap(self, size, mode, state):
-        # type: (QSize, QIcon.Mode, QIcon.State) -> QPixmap
-        if not self.__generator.isValid():
-            return QPixmap()
-
-        dsize = self.__generator.defaultSize()  # type: QSize
-        if not dsize.isNull():
-            dsize.scale(size, Qt.KeepAspectRatio)
-            size = dsize
-
-        pm = QPixmap(size)
-        pm.fill(Qt.transparent)
-        painter = QPainter(pm)
-        try:
-            self.__generator.render(
-                painter, QRectF(0, 0, size.width(), size.height()))
-        finally:
-            painter.end()
-        style = QApplication.style()
-        if style is not None:
-            opt = QStyleOption()
-            opt.palette = QApplication.palette()
-            pm = style.generatedIconPixmap(mode, pm, opt)
-        return pm
-
-    def clone(self):
-        return SvgIconEngine(self.__contents)

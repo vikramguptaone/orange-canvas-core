@@ -33,8 +33,7 @@ class TestMenu(QAppTestCase):
 
         menu.popup(QPoint(200, 200))
         menu.activateWindow()
-
-        self.app.exec_()
+        self.qWait()
 
     def test_menu_with_registry(self):
         registry = QtWidgetRegistry(small_testing_registry())
@@ -57,7 +56,8 @@ class TestMenu(QAppTestCase):
         menu.hovered.connect(hovered)
         self.app.setActiveWindow(menu)
 
-        rval = menu.exec_(QPoint(200, 200))
+        self.singleShot(100, menu.close)
+        rval = menu.exec(QPoint(200, 200))
 
         if triggered_action:
             self.assertIs(triggered_action[0], rval)
@@ -89,3 +89,11 @@ class TestMenu(QAppTestCase):
         self.assertEqual(get(3), "3")
         self.assertEqual(flat.rowCount(), model.rowCount())
         self.assertEqual(flat.columnCount(), 1)
+
+    def test_popup_position(self):
+        menu = QuickMenu()
+        screen = menu.screen()
+        screen_geom = screen.availableGeometry()
+        menu.popup(QPoint(screen_geom.topLeft() - QPoint(20, 20)))
+        geom = menu.geometry()
+        self.assertEqual(screen_geom.intersected(geom), geom)

@@ -6,6 +6,29 @@ Widget meta description classes
 
 import sys
 import copy
+import warnings
+
+import typing
+from typing import Union, Optional, List, Tuple, Iterable, Sequence
+
+from orangecanvas.utils import qualified_name
+
+__all__ = [
+    "DescriptionError",
+    "WidgetSpecificationError",
+    "SignalSpecificationError",
+    "CategorySpecificationError",
+    "Single",
+    "Multiple",
+    "Default",
+    "NonDefault",
+    "Explicit",
+    "Dynamic",
+    "InputSignal",
+    "OutputSignal",
+    "WidgetDescription",
+    "CategoryDescription",
+]
 
 # Exceptions
 
@@ -49,6 +72,14 @@ Dynamic = 64
 
 # Input/output signal (channel) description
 
+if typing.TYPE_CHECKING:
+    #: A simple single type spec (a fully qualified name or a type instance)
+    TypeSpecSimple = Union[str, type]
+    #: A tuple of simple type specs indicating a union type.
+    TypeSpecUnion = Tuple[TypeSpecSimple, ...]
+    #: Specification of a input/output type
+    TypeSpec = Union[TypeSpecSimple, TypeSpecUnion]
+
 
 class InputSignal(object):
     """
@@ -58,21 +89,39 @@ class InputSignal(object):
     ----------
     name : str
         Name of the channel.
-    type : str or `type`
-        Type of the accepted signals.
+    type : Union[str, type] or Tuple[Union[str, type]]
+        Specify the type of the accepted input. This can be a `type` instance,
+        a fully qualified type name or a tuple of such. If a tuple then the
+        input type is a union of the passed types.
+
+        .. versionchanged:: 0.1.5
+            Added `Union` type support.
     handler : str
         Name of the handler method for the signal.
-    flags : int, optional
+    flags : int
         Channel flags.
-    id : str
+    id : str, optional
         A unique id of the input signal.
     doc : str, optional
         A docstring documenting the channel.
-    replaces : List[str]
+    replaces : Iterable[str]
         A list of names this input replaces.
     """
+    name = ""  # type: str
+    type = ""  # type: TypeSpec
+    handler = ""  # type: str
+    id = None   # type: Optional[str]
+    doc = None  # type: Optional[str]
+    replaces = None  # type: List[str]
+
+    flags = None     # type: int
+    single = None    # type: bool
+    default = None   # type: bool
+    explicit = None  # type: bool
+
     def __init__(self, name, type, handler, flags=Single + NonDefault,
-                 id=None, doc=None, replaces=[]):
+                 id=None, doc=None, replaces=()):
+        # type: (str, TypeSpec, str, int, Optional[str], Optional[str], Iterable[str]) -> None
         self.name = name
         self.type = type
         self.handler = handler
@@ -86,14 +135,27 @@ class InputSignal(object):
         if not (flags & Default or flags & NonDefault):
             flags += NonDefault
 
-        self.single = flags & Single
-        self.default = flags & Default
-        self.explicit = flags & Explicit
+        self.single = bool(flags & Single)
+        self.default = bool(flags & Default)
+        self.explicit = bool(flags & Explicit)
         self.flags = flags
 
+    @property
+    def types(self):
+        # type: () -> Tuple[str, ...]
+        """
+        The normalized type specification. This is a tuple of qualified
+        type names that were passed to the constructor.
+
+        .. versionadded:: 0.1.5
+
+        :type: Tuple[str, ...]
+        """
+        return normalize_type(self.type)
+
     def __str__(self):
-        fmt = ("{0.__name__}(name={name!r}, type={type!s}, "
-               "handler={handler}, ...)")
+        fmt = ("{0.__name__}(name={name!r}, type={type!r}, "
+               "handler={handler!r}, ...)")
         return fmt.format(type(self), **self.__dict__)
 
     __repr__ = __str__
@@ -119,8 +181,13 @@ class OutputSignal(object):
     ----------
     name : str
         Name of the channel.
-    type : str or `type`
-        Type of the output signals.
+    type : Union[str, type] or Tuple[Union[str, type]]
+        Specify the type of the output. This can be a `type` instance,
+        a fully qualified type name or a tuple of such. If a tuple then the
+        output type is a union of the passed types.
+
+        .. versionchanged:: 0.1.5
+            Added `Union` type support.
     flags : int, optional
         Channel flags.
     id : str
@@ -130,8 +197,21 @@ class OutputSignal(object):
     replaces : List[str]
         A list of names this output replaces.
     """
-    def __init__(self, name, type, flags=Single + NonDefault,
-                 id=None, doc=None, replaces=[]):
+
+    name = ""  # type: str
+    type = ""  # type: TypeSpec
+    id = None   # type: Optional[str]
+    doc = None  # type: Optional[str]
+    replaces = None  # type: List[str]
+
+    single = None    # type: bool
+    default = None   # type: bool
+    explicit = None  # type: bool
+    dynamic = None   # type: bool
+
+    def __init__(self, name, type, flags=NonDefault,
+                 id=None, doc=None, replaces=()):
+        # type: (str, TypeSpec, int, Optional[str], Optional[str], Iterable[str]) -> None
         self.name = name
         self.type = type
         self.id = id
@@ -144,19 +224,26 @@ class OutputSignal(object):
         if not (flags & Default or flags & NonDefault):
             flags += NonDefault
 
-        self.single = flags & Single
-        self.default = flags & Default
-        self.explicit = flags & Explicit
-        self.dynamic = flags & Dynamic
+        self.default = bool(flags & Default)
+        self.explicit = bool(flags & Explicit)
+        self.dynamic = bool(flags & Dynamic)
         self.flags = flags
 
-        if self.dynamic and not self.single:
-            raise SignalSpecificationError(
-                "Output signal can not be 'Multiple' and 'Dynamic'."
-                )
+    @property
+    def types(self):
+        # type: () -> Tuple[str, ...]
+        """
+        The normalized type specification. This is a tuple of qualified
+        type names that were passed to the constructor.
+
+        .. versionadded:: 0.1.5
+
+        :type: Tuple[str, ...]
+        """
+        return normalize_type(self.type)
 
     def __str__(self):
-        fmt = ("{0.__name__}(name={name!r}, type={type!s}, "
+        fmt = ("{0.__name__}(name={name!r}, type={type!r}, "
                "...)")
         return fmt.format(type(self), **self.__dict__)
 
@@ -164,6 +251,7 @@ class OutputSignal(object):
 
 
 def output_channel_from_args(args):
+    # type: (...) -> OutputSignal
     if isinstance(args, tuple):
         return OutputSignal(*args)
     elif isinstance(args, dict):
@@ -173,6 +261,24 @@ def output_channel_from_args(args):
     else:
         raise TypeError("tuple, dict or OutputSignal expected "
                         "(got {0!r})".format(type(args)))
+
+
+def normalize_type_simple(type_):
+    # type: (TypeSpecSimple) -> str
+    if isinstance(type_, type):
+        return qualified_name(type_)
+    elif isinstance(type_, str):
+        return type_
+    else:
+        raise TypeError
+
+
+def normalize_type(type_):
+    # type: (TypeSpec) -> Tuple[str, ...]
+    if isinstance(type_, (type, str)):
+        return (normalize_type_simple(type_), )
+    else:
+        return tuple(map(normalize_type_simple, type_))
 
 
 class WidgetDescription(object):
@@ -202,9 +308,9 @@ class WidgetDescription(object):
         A package name where the widget is implemented.
     project_name : str, optional
         The distribution name that provides the widget.
-    inputs : list of :class:`InputSignal`, optional
+    inputs : Sequence[InputSignal]
         A list of input channels provided by the widget.
-    outputs : list of :class:`OutputSignal`, optional
+    outputs : Sequence[OutputSignal]
         A list of output channels provided by the widget.
     help : str, optional
         URL or an Resource template of a detailed widget help page.
@@ -227,21 +333,45 @@ class WidgetDescription(object):
         A filename of the widget icon (in relation to the package).
     background : str, optional
         Widget's background color (in the canvas GUI).
-    replaces : list-of-str, optional
+    replaces : list of `str`, optional
         A list of ids this widget replaces (optional).
-
+    short_name: str, optional
+        Short name for display where text would otherwise elide.
     """
+    name = ""  # type: str
+    id = ""    # type: str
+    qualified_name = None  # type: str
+    short_name = None  # type: str
+
+    description = ""  # type: str
+    category = None      # type: Optional[str]
+    project_name = None  # type: Optional[str]
+
+    inputs = []   # type: Sequence[InputSignal]
+    outputs = []  # type: Sequence[OutputSignal]
+
+    replaces = []  # type: Sequence[str]
+    keywords = []  # type: Sequence[str]
+
     def __init__(self, name, id, category=None, version=None,
                  description=None, long_description=None,
                  qualified_name=None, package=None, project_name=None,
-                 inputs=[], outputs=[],
+                 inputs=None, outputs=None,
                  author=None, author_email=None,
                  maintainer=None, maintainer_email=None,
                  help=None, help_ref=None, url=None, keywords=None,
                  priority=sys.maxsize,
                  icon=None, background=None,
-                 replaces=None,
+                 replaces=None, short_name=None,
                  ):
+        if inputs is None:
+            inputs = []
+        if outputs is None:
+            outputs = []
+        if keywords is None:
+            keywords = []
+        if replaces is None:
+            replaces = []
 
         if not qualified_name:
             # TODO: Should also check that the name is real.
@@ -256,6 +386,22 @@ class WidgetDescription(object):
         self.qualified_name = qualified_name
         self.package = package
         self.project_name = project_name
+        self.short_name = short_name
+        # Copy input/outputs and normalize the type to string.
+        inputs = [
+            InputSignal(
+                i.name, normalize_type(i.type), i.handler, i.flags, i.id,
+                i.doc, i.replaces
+            )
+            for i in inputs
+        ]
+        outputs = [
+            OutputSignal(
+                o.name, normalize_type(o.type), o.flags, o.id, o.doc,
+                o.replaces
+            )
+            for o in outputs
+        ]
         self.inputs = inputs
         self.outputs = outputs
         self.help = help
@@ -269,7 +415,7 @@ class WidgetDescription(object):
         self.priority = priority
         self.icon = icon
         self.background = background
-        self.replaces = replaces
+        self.replaces = list(replaces)
 
     def __str__(self):
         return ("WidgetDescription(name=%(name)r, id=%(id)r), "
@@ -280,98 +426,12 @@ class WidgetDescription(object):
 
     @classmethod
     def from_module(cls, module):
-        """
-        Get the widget description from a module.
-
-        The module is inspected for global variables (upper case versions of
-        `WidgetDescription.__init__` parameters).
-
-        Parameters
-        ----------
-        module : `module` or str
-            A module to inspect for widget description. Can be passed
-            as a string (qualified import name).
-
-        """
-        if isinstance(module, str):
-            module = __import__(module, fromlist=[""])
-
-        module_name = module.__name__.rsplit(".", 1)[-1]
-        if module.__package__:
-            package_name = module.__package__.rsplit(".", 1)[-1]
-        else:
-            package_name = None
-
-        # Default widget class name unless otherwise specified is the
-        # module name, and default category the package name
-        default_cls_name = module_name
-        default_cat_name = package_name if package_name else ""
-
-        widget_cls_name = getattr(module, "WIDGET_CLASS", default_cls_name)
-        try:
-            widget_class = getattr(module, widget_cls_name)
-            name = getattr(module, "NAME")
-        except AttributeError:
-            # The module does not have a widget class implementation or the
-            # widget name.
-            raise WidgetSpecificationError
-
-        qualified_name = "%s.%s" % (module.__name__, widget_cls_name)
-
-        id = getattr(module, "ID", module_name)
-        inputs = getattr(module, "INPUTS", [])
-        outputs = getattr(module, "OUTPUTS", [])
-        category = getattr(module, "CATEGORY", default_cat_name)
-        version = getattr(module, "VERSION", None)
-        description = getattr(module, "DESCRIPTION", name)
-        long_description = getattr(module, "LONG_DESCRIPTION", None)
-        author = getattr(module, "AUTHOR", None)
-        author_email = getattr(module, "AUTHOR_EMAIL", None)
-        maintainer = getattr(module, "MAINTAINER", None)
-        maintainer_email = getattr(module, "MAINTAINER_EMAIL", None)
-        help = getattr(module, "HELP", None)
-        help_ref = getattr(module, "HELP_REF", None)
-        url = getattr(module, "URL", None)
-
-        icon = getattr(module, "ICON", None)
-        priority = getattr(module, "PRIORITY", sys.maxsize)
-        keywords = getattr(module, "KEYWORDS", None)
-        background = getattr(module, "BACKGROUND", None)
-        replaces = getattr(module, "REPLACES", None)
-
-        inputs = list(map(input_channel_from_args, inputs))
-        outputs = list(map(output_channel_from_args, outputs))
-
-        # Convert all signal types into qualified names.
-        # This is to prevent any possible import problems when cached
-        # descriptions are unpickled (the relevant code using this lists
-        # should be able to handle missing types better).
-        for s in inputs + outputs:
-            s.type = "%s.%s" % (s.type.__module__, s.type.__name__)
-
-        return WidgetDescription(
-            name=name,
-            id=id,
-            category=category,
-            version=version,
-            description=description,
-            long_description=long_description,
-            qualified_name=qualified_name,
-            package=module.__package__,
-            inputs=inputs,
-            outputs=outputs,
-            author=author,
-            author_email=author_email,
-            maintainer=maintainer,
-            maintainer_email=maintainer_email,
-            help=help,
-            help_ref=help_ref,
-            url=url,
-            keywords=keywords,
-            priority=priority,
-            icon=icon,
-            background=background,
-            replaces=replaces)
+        warnings.warn(
+            "'WidgetDescription.from_module' is deprecated",
+            PendingDeprecationWarning, stacklevel=2
+        )
+        from .utils import widget_from_module_globals
+        return widget_from_module_globals(module)
 
 
 class CategoryDescription(object):
@@ -404,6 +464,12 @@ class CategoryDescription(object):
         Is this category (by default) hidden in the canvas gui.
 
     """
+    name = ""  # type: str
+    qualified_name = ""  # type: str
+    project_name = ""  # type: str
+    priority = None  # type: int
+    icon = ""  # type: str
+
     def __init__(self, name=None, version=None,
                  description=None, long_description=None,
                  qualified_name=None, package=None,
@@ -442,54 +508,9 @@ class CategoryDescription(object):
 
     @classmethod
     def from_package(cls, package):
-        """
-        Get the CategoryDescription from a package.
-
-        Parameters
-        ----------
-        package : `module` or `str`
-            A package containing the category.
-
-        """
-        if isinstance(package, str):
-            package = __import__(package, fromlist=[""])
-        package_name = package.__name__
-        qualified_name = package_name
-        default_name = package_name.rsplit(".", 1)[-1]
-
-        name = getattr(package, "NAME", default_name)
-        description = getattr(package, "DESCRIPTION", None)
-        long_description = getattr(package, "LONG_DESCRIPTION", None)
-        author = getattr(package, "AUTHOR", None)
-        author_email = getattr(package, "AUTHOR_EMAIL", None)
-        maintainer = getattr(package, "MAINTAINER", None)
-        maintainer_email = getattr(package, "MAINTAINER_MAIL", None)
-        url = getattr(package, "URL", None)
-        help = getattr(package, "HELP", None)
-        keywords = getattr(package, "KEYWORDS", None)
-        widgets = getattr(package, "WIDGETS", None)
-        priority = getattr(package, "PRIORITY", sys.maxsize - 1)
-        icon = getattr(package, "ICON", None)
-        background = getattr(package, "BACKGROUND", None)
-        hidden = getattr(package, "HIDDEN", None)
-
-        if priority == sys.maxsize - 1 and name.lower() == "prototypes":
-            priority = sys.maxsize
-
-        return CategoryDescription(
-            name=name,
-            qualified_name=qualified_name,
-            description=description,
-            long_description=long_description,
-            help=help,
-            author=author,
-            author_email=author_email,
-            maintainer=maintainer,
-            maintainer_email=maintainer_email,
-            url=url,
-            keywords=keywords,
-            widgets=widgets,
-            priority=priority,
-            icon=icon,
-            background=background,
-            hidden=hidden)
+        warnings.warn(
+            "'CategoryDescription.from_package' is deprecated",
+            DeprecationWarning, stacklevel=2
+        )
+        from .utils import category_from_package_globals
+        return category_from_package_globals(package)

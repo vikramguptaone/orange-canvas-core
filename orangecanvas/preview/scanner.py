@@ -4,15 +4,22 @@ Scheme file preview parser.
 """
 import io
 import logging
+import typing
 
 from xml.sax import make_parser, handler, saxutils, SAXParseException
+from typing import BinaryIO, Tuple, List
 
 from ..scheme.readwrite import scheme_load
+
+if typing.TYPE_CHECKING:
+    from .previewmodel import PreviewItem
+
 log = logging.getLogger(__name__)
 
 
 class PreviewHandler(handler.ContentHandler):
     def __init__(self):
+        super().__init__()
         self._in_name = False
         self._in_description = False
         self._in_thumbnail = False
@@ -45,10 +52,11 @@ class PreviewHandler(handler.ContentHandler):
         elif self._in_description:
             self.description_data.append(content)
         elif self._in_thumbnail:
-            self._thumbnail_data.append(content)
+            self.thumbnail_data.append(content)
 
 
 def preview_parse(scheme_file):
+    # type: (str) -> Tuple[str, str, str]
     """Return the title, description, and thumbnail svg image data from a
     `scheme_file` (can be a file path or a file-like object).
 
@@ -68,7 +76,7 @@ def preview_parse(scheme_file):
 
 
 def filter_properties(stream):
-    # type: (io.BinaryIO) -> bytes
+    # type: (BinaryIO) -> bytes
     """
     Filter out the '<properties>' section from the .ows xml stream.
 
@@ -112,17 +120,17 @@ def filter_properties(stream):
 
 
 def scheme_svg_thumbnail(scheme_file):
-    """Load the scheme scheme from a file and return it's svg image
+    # type: (str) -> str
+    """Load the scheme scheme from a file and return its svg image
     representation.
-
     """
-    from .. import scheme
+    from ..scheme import Scheme
     from ..canvas import scene
     from ..registry import global_registry
 
-    scheme = scheme.Scheme()
+    scheme = Scheme()
     scheme.set_loop_flags(scheme.AllowLoops | scheme.AllowSelfLoops)
-    errors = []
+    errors = []  # type: List[Exception]
 
     with open(scheme_file, "rb") as f:
         filtered_contents = filter_properties(f)
@@ -132,10 +140,13 @@ def scheme_svg_thumbnail(scheme_file):
     tmp_scene = scene.CanvasScene()
     tmp_scene.set_channel_names_visible(False)
     tmp_scene.set_registry(global_registry())
+    tmp_scene.set_node_animation_enabled(False)
     tmp_scene.set_scheme(scheme)
 
     # Force the anchor point layout.
     tmp_scene.anchor_layout().activate()
+    # Last added node is auto-selected. Need to clear.
+    tmp_scene.clearSelection()
 
     svg = scene.grab_svg(tmp_scene)
     tmp_scene.clear()
@@ -144,13 +155,12 @@ def scheme_svg_thumbnail(scheme_file):
 
 
 def scan_update(item):
+    # type: (PreviewItem) -> None
     """Given a preview item, scan the scheme file ('item.path') and update the
-    items contents.
-
+    item's contents.
     """
 
     path = item.path()
-
     try:
         title, desc, svg = preview_parse(path)
     except SAXParseException as ex:

@@ -3,16 +3,18 @@ Orange Canvas Tool Dock widget
 
 """
 import sys
+import warnings
+from typing import Optional, Any
 
 from AnyQt.QtWidgets import (
-    QWidget, QSplitter, QVBoxLayout, QTextEdit, QAction, QSizePolicy,
-    QApplication,
-)
-from AnyQt.QtGui import QPalette, QBrush, QDrag
+    QWidget, QSplitter, QVBoxLayout, QAction, QSizePolicy, QApplication,
+    QToolButton, QTreeView)
+from AnyQt.QtGui import QPalette, QBrush, QDrag, QResizeEvent, QHideEvent
 
 from AnyQt.QtCore import (
     Qt, QSize, QObject, QPropertyAnimation, QEvent, QRect, QPoint,
-    QModelIndex, QPersistentModelIndex, QEventLoop, QMimeData
+    QAbstractItemModel, QModelIndex, QPersistentModelIndex, QEventLoop,
+    QMimeData
 )
 from AnyQt.QtCore import pyqtProperty as Property, pyqtSignal as Signal
 
@@ -20,8 +22,8 @@ from ..gui.toolgrid import ToolGrid
 from ..gui.toolbar import DynamicResizeToolBar
 from ..gui.quickhelp import QuickHelp
 from ..gui.framelesswindow import FramelessWindow
+from ..gui.utils import create_css_gradient, available_screen_geometry
 from ..document.quickmenu import MenuPage
-from ..document.quickmenu import create_css_gradient
 from .widgettoolbox import WidgetToolBox, iter_index, item_text, item_icon, item_tooltip
 from ..registry.qt import QtWidgetRegistry
 
@@ -30,10 +32,11 @@ class SplitterResizer(QObject):
     """
     An object able to control the size of a widget in a QSplitter instance.
     """
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.__splitter = None
-        self.__widget = None
+    def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QObject], Any) -> None
+        super().__init__(parent, **kwargs)
+        self.__splitter = None  # type: Optional[QSplitter]
+        self.__widget = None    # type: Optional[QWidget]
         self.__updateOnShow = True  # Need __update on next show event
         self.__animationEnabled = True
         self.__size = -1
@@ -41,11 +44,13 @@ class SplitterResizer(QObject):
         self.__animation = QPropertyAnimation(
             self, b"size_", self, duration=200
         )
-        self.__action = QAction("toogle-expanded", self, checkable=True)
+        self.__action = QAction("toggle-expanded", self, checkable=True)
         self.__action.triggered[bool].connect(self.setExpanded)
 
     def setSize(self, size):
-        """Set the size of the controlled widget (either width or height
+        # type: (int) -> None
+        """
+        Set the size of the controlled widget (either width or height
         depending on the orientation).
 
         .. note::
@@ -56,9 +61,10 @@ class SplitterResizer(QObject):
             self.__update()
 
     def size(self):
-        """Return the size of the widget in the splitter (either height of
+        # type: () -> int
+        """
+        Return the size of the widget in the splitter (either height of
         width) depending on the splitter orientation.
-
         """
         if self.__splitter and self.__widget:
             index = self.__splitter.indexOf(self.__widget)
@@ -70,21 +76,22 @@ class SplitterResizer(QObject):
     size_ = Property(int, fget=size, fset=setSize)
 
     def setAnimationEnabled(self, enable):
-        """Enable/disable animation.
-        """
+        # type: (bool) -> None
+        """Enable/disable animation."""
         self.__animation.setDuration(0 if enable else 200)
 
     def animationEnabled(self):
+        # type: () -> bool
         return self.__animation.duration() == 0
 
     def setSplitterAndWidget(self, splitter, widget):
+        # type: (QSplitter, QWidget) -> None
         """Set the QSplitter and QWidget instance the resizer should control.
 
         .. note:: the widget must be in the splitter.
-
         """
         if splitter and widget and not splitter.indexOf(widget) > 0:
-            raise ValueError("Widget must be in a spliter.")
+            raise ValueError("Widget must be in a splitter.")
 
         if self.__widget is not None:
             self.__widget.removeEventFilter(self)
@@ -107,12 +114,21 @@ class SplitterResizer(QObject):
         elif not self.__expanded and size > 0:
             self.close()
 
-    def toogleExpandedAction(self):
+    def toggleExpandedAction(self):
+        # type: () -> QAction
         """Return a QAction that can be used to toggle expanded state.
         """
         return self.__action
 
+    def toogleExpandedAction(self):
+        warnings.warn(
+            "'toogleExpandedAction is deprecated, use 'toggleExpandedAction' "
+            "instead.", DeprecationWarning, stacklevel=2
+        )
+        return self.toggleExpandedAction()
+
     def open(self):
+        # type: () -> None
         """Open the controlled widget (expand it to sizeHint).
         """
         self.__expanded = True
@@ -133,6 +149,7 @@ class SplitterResizer(QObject):
         self.__animation.start()
 
     def close(self):
+        # type: () -> None
         """Close the controlled widget (shrink to size 0).
         """
         self.__expanded = False
@@ -146,9 +163,8 @@ class SplitterResizer(QObject):
         self.__animation.start()
 
     def setExpanded(self, expanded):
-        """Set the expanded state.
-
-        """
+        # type: (bool) -> None
+        """Set the expanded state."""
         if self.__expanded != expanded:
             if expanded:
                 self.open()
@@ -156,13 +172,13 @@ class SplitterResizer(QObject):
                 self.close()
 
     def expanded(self):
-        """Return the expanded state.
-        """
+        # type: () -> bool
+        """Return the expanded state."""
         return self.__expanded
 
     def __update(self):
-        """Update the splitter sizes.
-        """
+        # type: () -> None
+        """Update the splitter sizes."""
         if self.__splitter and self.__widget:
             if sum(self.__splitter.sizes()) == 0:
                 # schedule update on next show event
@@ -179,10 +195,13 @@ class SplitterResizer(QObject):
             self.__splitter.setSizes(sizes)
 
     def eventFilter(self, obj, event):
+        # type: (QObject, QEvent) -> bool
         if event.type() == QEvent.Resize and obj is self.__widget and \
                 self.__animation.state() == QPropertyAnimation.Stopped:
             # Update the expanded state when the user opens/closes the widget
             # by dragging the splitter handle.
+            assert self.__splitter is not None
+            assert isinstance(event, QResizeEvent)
             if self.__splitter.orientation() == Qt.Vertical:
                 size = event.size().height()
             else:
@@ -205,9 +224,9 @@ class SplitterResizer(QObject):
 
 class QuickHelpWidget(QuickHelp):
     def minimumSizeHint(self):
+        # type: () -> QSize
         """Reimplemented to allow the Splitter to resize the widget
         with a continuous animation.
-
         """
         hint = super().minimumSizeHint()
         return QSize(hint.width(), 0)
@@ -216,9 +235,9 @@ class QuickHelpWidget(QuickHelp):
 class CanvasToolDock(QWidget):
     """Canvas dock widget with widget toolbox, quick help and
     canvas actions.
-
     """
     def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QWidget], Any) -> None
         super().__init__(parent, **kwargs)
 
         self.__setupUi()
@@ -253,37 +272,49 @@ class CanvasToolDock(QWidget):
         self.__splitterResizer.setSplitterAndWidget(self.__splitter, self.help)
 
     def setQuickHelpVisible(self, state):
-        """Set the quick help box visibility status.
-        """
+        # type: (bool) -> None
+        """Set the quick help box visibility status."""
         self.__splitterResizer.setExpanded(state)
 
     def quickHelpVisible(self):
+        # type: () -> bool
         return self.__splitterResizer.expanded()
 
     def setQuickHelpAnimationEnabled(self, enabled):
-        """Enable/disable the quick help animation.
-        """
+        # type: (bool) -> None
+        """Enable/disable the quick help animation."""
         self.__splitterResizer.setAnimationEnabled(enabled)
 
+    def toggleQuickHelpAction(self):
+        # type: () -> QAction
+        """Return a checkable QAction for help show/hide."""
+        return self.__splitterResizer.toggleExpandedAction()
+
     def toogleQuickHelpAction(self):
-        """Return a checkable QAction for help show/hide.
-        """
-        return self.__splitterResizer.toogleExpandedAction()
+        warnings.warn(
+            "'toogleQuickHelpAction' is deprecated, use "
+            "'toggleQuickHelpAction' instead.", DeprecationWarning,
+            stacklevel=2
+        )
+        return self.toggleQuickHelpAction()
 
 
 class QuickCategoryToolbar(ToolGrid):
-    """A toolbar with category buttons.
-    """
-    def __init__(self, parent=None, buttonSize=None, iconSize=None):
+    """A toolbar with category buttons."""
+    def __init__(self, parent=None, buttonSize=QSize(), iconSize=QSize(),
+                 **kwargs):
+        # type: (Optional[QWidget], QSize, QSize, Any) -> None
         super().__init__(parent, 1, buttonSize, iconSize,
-                         Qt.ToolButtonIconOnly)
-        self.__model = None
+                         Qt.ToolButtonIconOnly, **kwargs)
+        self.__model = None  # type: Optional[QAbstractItemModel]
 
     def setColumnCount(self, count):
         raise Exception("Cannot set the column count on a Toolbar")
 
     def setModel(self, model):
-        """Set the registry model.
+        # type: (Optional[QAbstractItemModel]) -> None
+        """
+        Set the registry model.
         """
         if self.__model is not None:
             self.__model.dataChanged.disconnect(self.__on_dataChanged)
@@ -292,21 +323,25 @@ class QuickCategoryToolbar(ToolGrid):
             self.clear()
 
         self.__model = model
-        if self.__model is not None:
-            self.__model.dataChanged.connect(self.__on_dataChanged)
-            self.__model.rowsInserted.connect(self.__on_rowsInserted)
-            self.__model.rowsRemoved.connect(self.__on_rowsRemoved)
+        if model is not None:
+            model.dataChanged.connect(self.__on_dataChanged)
+            model.rowsInserted.connect(self.__on_rowsInserted)
+            model.rowsRemoved.connect(self.__on_rowsRemoved)
             self.__initFromModel(model)
 
     def __initFromModel(self, model):
-        """Initialize the toolbar from the model.
+        # type: (QAbstractItemModel) -> None
+        """
+        Initialize the toolbar from the model.
         """
         for index in iter_index(model, QModelIndex()):
             action = self.createActionForItem(index)
             self.addAction(action)
 
     def createActionForItem(self, index):
-        """Create the QAction instance for item at `index` (`QModelIndex`).
+        # type: (QModelIndex) -> QAction
+        """
+        Create the QAction instance for item at `index` (`QModelIndex`).
         """
         action = QAction(
             item_icon(index), item_text(index), self,
@@ -316,7 +351,9 @@ class QuickCategoryToolbar(ToolGrid):
         return action
 
     def createButtonForAction(self, action):
-        """Create a button for the action.
+        # type: (QAction) -> QToolButton
+        """
+        Create a button for the action.
         """
         button = super().createButtonForAction(action)
 
@@ -345,6 +382,8 @@ class QuickCategoryToolbar(ToolGrid):
         return button
 
     def __on_dataChanged(self, topLeft, bottomRight):
+        # type: (QModelIndex, QModelIndex) -> None
+        assert self.__model is not None
         parent = topLeft.parent()
         if not parent.isValid():
             for row in range(topLeft.row(), bottomRight.row() + 1):
@@ -355,23 +394,33 @@ class QuickCategoryToolbar(ToolGrid):
                 action.setToolTip(item_tooltip(item))
 
     def __on_rowsInserted(self, parent, start, end):
+        # type: (QModelIndex, int, int) -> None
+        assert self.__model is not None
         if not parent.isValid():
             for row in range(start, end + 1):
                 item = self.__model.index(row, 0)
                 self.insertAction(row, self.createActionForItem(item))
 
     def __on_rowsRemoved(self, parent, start, end):
+        # type: (QModelIndex, int, int) -> None
+        assert self.__model is not None
         if not parent.isValid():
             for row in range(end, start - 1, -1):
                 action = self.actions()[row]
                 self.removeAction(action)
 
 
+# This implements the (single category) node selection popup when the
+# tooldock is not expanded.
 class CategoryPopupMenu(FramelessWindow):
+    """
+    A menu popup from which nodes can be dragged or clicked/activated.
+    """
     triggered = Signal(QAction)
     hovered = Signal(QAction)
 
     def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QWidget], Any) -> None
         super().__init__(parent, **kwargs)
         self.setWindowFlags(self.windowFlags() | Qt.Popup)
 
@@ -391,38 +440,87 @@ class CategoryPopupMenu(FramelessWindow):
         self.__dragListener.dragStarted.connect(self.__onDragStarted)
 
         self.__menu.view().viewport().installEventFilter(self.__dragListener)
+        self.__menu.view().installEventFilter(self)
 
         layout.addWidget(self.__menu)
 
         self.setLayout(layout)
 
-        self.__action = None
-        self.__loop = None
-        self.__item = None
+        self.__action = None  # type: Optional[QAction]
+        self.__loop = None    # type: Optional[QEventLoop]
 
     def setCategoryItem(self, item):
         """
         Set the category root item (:class:`QStandardItem`).
         """
-        self.__item = item
+        warnings.warn(
+            "setCategoryItem is deprecated. Use the more general 'setModel'"
+            "and setRootIndex", DeprecationWarning, stacklevel=2
+        )
         model = item.model()
         self.__menu.setModel(model)
         self.__menu.setRootIndex(item.index())
 
+    def setModel(self, model):
+        # type: (QAbstractItemModel) -> None
+        """
+        Set the model.
+
+        Parameters
+        ----------
+        model : QAbstractItemModel
+        """
+        self.__menu.setModel(model)
+
+    def setRootIndex(self, index):
+        # type: (QModelIndex) -> None
+        """
+        Set the root index in `model`.
+
+        Parameters
+        ----------
+        index : QModelIndex
+        """
+        self.__menu.setRootIndex(index)
+
+    def setActionRole(self, role):
+        # type: (Qt.ItemDataRole) -> None
+        """
+        Set the action role in model.
+
+        This is an item role in `model` that returns a QAction for the item.
+
+        Parameters
+        ----------
+        role : Qt.ItemDataRole
+        """
+        self.__menu.setActionRole(role)
+
     def popup(self, pos=None):
+        # type: (Optional[QPoint]) -> None
+        """
+        Show the popup at `pos`.
+
+        Parameters
+        ----------
+        pos : Optional[QPoint]
+            The position in global screen coordinates
+        """
         if pos is None:
             pos = self.pos()
         self.adjustSize()
         geom = widget_popup_geometry(pos, self)
         self.setGeometry(geom)
         self.show()
+        self.__menu.view().setFocus()
 
-    def exec_(self, pos=None):
+    def exec(self, pos=None):
+        # type: (Optional[QPoint]) -> Optional[QAction]
         self.popup(pos)
         self.__loop = QEventLoop()
 
         self.__action = None
-        self.__loop.exec_()
+        self.__loop.exec()
         self.__loop = None
 
         if self.__action is not None:
@@ -431,13 +529,20 @@ class CategoryPopupMenu(FramelessWindow):
             action = None
         return action
 
+    def exec_(self, *args, **kwargs):
+        warnings.warn(
+            "exec_ is deprecated, use exec", DeprecationWarning, stacklevel=2
+        )
+        return self.exec(*args, **kwargs)
+
     def hideEvent(self, event):
+        # type: (QHideEvent) -> None
         if self.__loop is not None:
             self.__loop.exit(0)
-
-        return super().hideEvent(event)
+        super().hideEvent(event)
 
     def __onTriggered(self, action):
+        # type: (QAction) -> None
         self.__action = action
         self.triggered.emit(action)
         self.hide()
@@ -446,12 +551,13 @@ class CategoryPopupMenu(FramelessWindow):
             self.__loop.exit(0)
 
     def __onDragStarted(self, index):
+        # type: (QModelIndex) -> None
         desc = index.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
         icon = index.data(Qt.DecorationRole)
 
         drag_data = QMimeData()
         drag_data.setData(
-            "application/vnv.orange-canvas.registry.qualified-name",
+            "application/vnd.orange-canvas.registry.qualified-name",
             desc.qualified_name.encode('utf-8')
         )
         drag = QDrag(self)
@@ -468,20 +574,32 @@ class CategoryPopupMenu(FramelessWindow):
         filter = ToolTipEventFilter()
         viewport.installEventFilter(filter)
 
-        drag.exec_(Qt.CopyAction)
+        drag.exec(Qt.CopyAction)
 
         viewport.removeEventFilter(filter)
+
+    def eventFilter(self, obj, event):
+        if isinstance(obj, QTreeView) and event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in [Qt.Key_Return, Qt.Key_Enter]:
+                curr = obj.currentIndex()
+                if curr.isValid():
+                    obj.activated.emit(curr)
+                    return True
+        return super().eventFilter(obj, event)
 
 
 class ItemViewDragStartEventListener(QObject):
     dragStarted = Signal(QModelIndex)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._pos = None
-        self._index = None
+    def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QObject], Any) -> None
+        super().__init__(parent, **kwargs)
+        self._pos = None    # type: Optional[QPoint]
+        self._index = None  # type: Optional[QPersistentModelIndex]
 
     def eventFilter(self, viewport, event):
+        # type: (QObject, QEvent) -> bool
         view = viewport.parent()
 
         if event.type() == QEvent.MouseButtonPress and \
@@ -496,12 +614,10 @@ class ItemViewDragStartEventListener(QObject):
         elif event.type() == QEvent.MouseMove and self._pos is not None and \
                 ((self._pos - event.pos()).manhattanLength() >=
                  QApplication.startDragDistance()):
-
+            assert self._index is not None
             if self._index.isValid():
                 # Map to a QModelIndex in the model.
-                index = self._index
-                index = index.model().index(index.row(), index.column(),
-                                            index.parent())
+                index = QModelIndex(self._index)
                 self._pos = None
                 self._index = None
 
@@ -512,6 +628,7 @@ class ItemViewDragStartEventListener(QObject):
 
 class ToolTipEventFilter(QObject):
     def eventFilter(self, receiver, event):
+        # type: (QObject, QEvent) -> bool
         if event.type() == QEvent.ToolTip:
             return True
 
@@ -519,6 +636,7 @@ class ToolTipEventFilter(QObject):
 
 
 def widget_popup_geometry(pos, widget):
+    # type: (QPoint, QWidget) -> QRect
     widget.ensurePolished()
 
     if widget.testAttribute(Qt.WA_Resized):
@@ -526,22 +644,17 @@ def widget_popup_geometry(pos, widget):
     else:
         size = widget.sizeHint()
 
-    desktop = QApplication.desktop()
-    screen_geom = desktop.availableGeometry(pos)
-
-    # Adjust the size to fit inside the screen.
-    if size.height() > screen_geom.height():
-        size.setHeight(screen_geom.height())
-    if size.width() > screen_geom.width():
-        size.setWidth(screen_geom.width())
-
+    screen = QApplication.screenAt(pos)
+    if screen is None:
+        screen = QApplication.primaryScreen()
+    screen_geom = screen.availableGeometry()
+    size = size.boundedTo(screen_geom.size())
     geom = QRect(pos, size)
 
     if geom.top() < screen_geom.top():
-        geom.setTop(screen_geom.top())
-
+        geom.moveTop(screen_geom.top())
     if geom.left() < screen_geom.left():
-        geom.setLeft(screen_geom.left())
+        geom.moveLeft(screen_geom.left())
 
     bottom_margin = screen_geom.bottom() - geom.bottom()
     right_margin = screen_geom.right() - geom.right()
@@ -559,6 +672,7 @@ def widget_popup_geometry(pos, widget):
 
 
 def popup_position_from_source(popup, source, orientation=Qt.Vertical):
+    # type: (QWidget, QWidget, Qt.Orientation) -> QPoint
     popup.ensurePolished()
     source.ensurePolished()
 
@@ -567,8 +681,7 @@ def popup_position_from_source(popup, source, orientation=Qt.Vertical):
     else:
         size = popup.sizeHint()
 
-    desktop = QApplication.desktop()
-    screen_geom = desktop.availableGeometry(source)
+    screen_geom = available_screen_geometry(source)
     source_rect = QRect(source.mapToGlobal(QPoint(0, 0)), source.size())
 
     if orientation == Qt.Vertical:
@@ -582,14 +695,14 @@ def popup_position_from_source(popup, source, orientation=Qt.Vertical):
         if dy < 0:
             y = source_rect.top()
         else:
-            y = source_rect.top() - dy
+            y = max(screen_geom.top(), source_rect.top() - dy)
     else:
         # right overflow
         dx = source_rect.left() + size.width() - screen_geom.right()
         if dx < 0:
             x = source_rect.left()
         else:
-            x = source_rect.left() - dx
+            x = max(source_rect.left() - dx, screen_geom.left())
 
         if source_rect.bottom() + size.height() < screen_geom.bottom():
             y = source_rect.bottom()

@@ -5,55 +5,79 @@ Tool Box Widget
 
 A reimplementation of the :class:`QToolBox` widget that keeps all the tabs
 in a single :class:`QScrollArea` instance and can keep multiple open tabs.
-
 """
-
-from collections import namedtuple
+import enum
 from operator import eq, attrgetter
+
+import typing
+from typing import NamedTuple, List, Iterable, Optional, Any, Callable
 
 from AnyQt.QtWidgets import (
     QWidget, QFrame, QSizePolicy, QStyle, QStyleOptionToolButton,
-    QStyleOptionToolBox, QScrollArea, QVBoxLayout, QToolButton,
-    QAction, QActionGroup, QApplication, QWIDGETSIZE_MAX
+    QScrollArea, QVBoxLayout, QToolButton,
+    QAction, QActionGroup, QApplication, QAbstractButton, QWIDGETSIZE_MAX,
 )
 from AnyQt.QtGui import (
-    QIcon, QFontMetrics, QPainter, QPalette, QBrush, QPen, QColor,
+    QIcon, QFontMetrics, QPainter, QPalette, QBrush, QPen, QColor, QFont
 )
 from AnyQt.QtCore import (
-    Qt, QObject, QSize, QRect, QPoint, QSignalMapper, QEvent
+    Qt, QObject, QSize, QRect, QPoint, QSignalMapper
 )
-from AnyQt.QtCore import pyqtSignal as Signal, pyqtProperty as Property
+from AnyQt.QtCore import Signal, Property
 
-from .utils import brush_darker
+from ..utils import set_flag
+from .utils import brush_darker, ScrollBar
 
-_ToolBoxPage = namedtuple(
-    "_ToolBoxPage",
-    ["index",
-     "widget",
-     "action",
-     "button"]
-    )
+__all__ = [
+    "ToolBox"
+]
 
-
-FOCUS_OUTLINE_COLOR = "#609ED7"
+_ToolBoxPage = NamedTuple(
+    "_ToolBoxPage", [
+        ("index", int),
+        ("widget", QWidget),
+        ("action", QAction),
+        ("button", QAbstractButton),
+    ]
+)
 
 
 class ToolBoxTabButton(QToolButton):
     """
     A tab button for an item in a :class:`ToolBox`.
     """
+    class TabPosition(enum.IntFlag):
+        Beginning = 0
+        Middle = 1
+        End = 2
+        OnlyOneTab = 3
+
+    Beginning = TabPosition.Beginning
+    Middle = TabPosition.Middle
+    End = TabPosition.End
+    OnlyOneTab = TabPosition.OnlyOneTab
+
+    class SelectedPosition(enum.IntFlag):
+        NotAdjacent = 0
+        NextIsSelected = 1
+        PreviousIsSelected = 2
+
+    NotAdjacent = SelectedPosition.NotAdjacent
+    NextIsSelected = SelectedPosition.NextIsSelected
+    PreviousIsSelected = SelectedPosition.PreviousIsSelected
 
     def setNativeStyling(self, state):
+        # type: (bool) -> None
         """
         Render tab buttons as native (or css styled) :class:`QToolButtons`.
         If set to `False` (default) the button is pained using a custom
         paint routine.
-
         """
         self.__nativeStyling = state
         self.update()
 
     def nativeStyling(self):
+        # type: () -> bool
         """
         Use :class:`QStyle`'s to paint the class:`QToolButton` look.
         """
@@ -64,25 +88,19 @@ class ToolBoxTabButton(QToolButton):
                               fset=setNativeStyling,
                               designable=True)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QWidget], Any) -> None
         self.__nativeStyling = False
-        self.position = QStyleOptionToolBox.OnlyOneTab
-        self.selected = QStyleOptionToolBox.NotAdjacent
-        font = kwargs.pop("font", None)
-        palette = kwargs.pop("palette", None)
-
-        super().__init__(*args, **kwargs)
+        self.position = ToolBoxTabButton.OnlyOneTab
+        self.selected = ToolBoxTabButton.NotAdjacent
+        font = kwargs.pop("font", None)  # type: Optional[QFont]
+        super().__init__(parent, **kwargs)
 
         if font is None:
             self.setFont(QApplication.font("QAbstractButton"))
             self.setAttribute(Qt.WA_SetFont, False)
         else:
             self.setFont(font)
-        if palette is None:
-            self.setPalette(QApplication.palette("QAbstractButton"))
-            self.setAttribute(Qt.WA_SetPalette, False)
-        else:
-            self.setPalette(palette)
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -127,15 +145,15 @@ class ToolBoxTabButton(QToolButton):
         rect = opt.rect
 
         icon_area_rect = QRect(rect)
-        icon_area_rect.setRight(int(icon_area_rect.height() * 1.26))
+        icon_area_rect.setWidth(int(icon_area_rect.height() * 1.26))
 
         text_rect = QRect(rect)
-        text_rect.setLeft(icon_area_rect.right() + 10)
+        text_rect.setLeft(icon_area_rect.x() + icon_area_rect.width() + 10)
 
-        # Background  (TODO: Should the tab button have native
-        # toolbutton shape, drawn using PE_PanelButtonTool or even
-        # QToolBox tab shape)
+        # Background
 
+        # TODO: Should the tab button have native toolbutton shape, drawn
+        #       using PE_PanelButtonTool or even QToolBox tab shape
         # Default outline pen
         pen = QPen(palette.color(QPalette.Mid))
 
@@ -151,12 +169,14 @@ class ToolBoxTabButton(QToolButton):
             p.drawRect(icon_area_rect)
             # Line between the icon and text
             p.setPen(pen)
-            p.drawLine(icon_area_rect.topRight(),
-                       icon_area_rect.bottomRight())
+            p.drawLine(
+                icon_area_rect.x() + icon_area_rect.width(), icon_area_rect.y(),
+                icon_area_rect.x() + icon_area_rect.width(),
+                icon_area_rect.y() + icon_area_rect.height())
 
         if opt.state & QStyle.State_HasFocus:
             # Set the focus frame pen and draw the border
-            pen = QPen(QColor(FOCUS_OUTLINE_COLOR))
+            pen = QPen(QColor(brush_highlight))
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             # Adjust for pen
@@ -166,14 +186,13 @@ class ToolBoxTabButton(QToolButton):
         else:
             p.setPen(pen)
             # Draw the top/bottom border
-            if self.position == QStyleOptionToolBox.OnlyOneTab or \
-                    self.position == QStyleOptionToolBox.Beginning or \
-                    self.selected & \
-                        QStyleOptionToolBox.PreviousIsSelected:
-
-                p.drawLine(rect.topLeft(), rect.topRight())
-
-            p.drawLine(rect.bottomLeft(), rect.bottomRight())
+            if self.position == ToolBoxTabButton.OnlyOneTab or \
+                    self.position == ToolBoxTabButton.Beginning or \
+                    self.selected & ToolBoxTabButton.PreviousIsSelected:
+                p.drawLine(rect.x(), rect.y(),
+                           rect.x() + rect.width(), rect.y())
+            p.drawLine(rect.x(), rect.y() + rect.height(),
+                       rect.x() + rect.width(), rect.y() + rect.height())
 
         p.restore()
 
@@ -183,7 +202,7 @@ class ToolBoxTabButton(QToolButton):
         p.setFont(opt.font)
 
         p.drawText(text_rect,
-                   int(Qt.AlignVCenter | Qt.AlignLeft) | \
+                   int(Qt.AlignVCenter | Qt.AlignLeft) |
                    int(Qt.TextSingleLine),
                    text)
 
@@ -203,29 +222,15 @@ class ToolBoxTabButton(QToolButton):
         p.restore()
 
 
-class _ToolBoxScrollArea(QScrollArea):
-    def eventFilter(self, obj, event):
-        if obj is self.widget() and event.type() == QEvent.Resize:
-            if event.size() == event.oldSize() and self.widgetResizable():
-                # This is driving me insane. This should not have happened.
-                # Before the event is sent QWidget specifically makes sure the
-                # sizes are different, but somehow I still get this, and enter
-                # an infinite recursion if I enter QScrollArea.eventFilter.
-                # I can only duplicate this on one development machine a
-                # Mac OSX using fink and Qt 4.7.3
-                return False
-
-        return super().eventFilter(obj, event)
-
-
 class _ToolBoxLayout(QVBoxLayout):
     def __init__(self, *args, **kwargs):
-        self.__minimumSize = None
-        self.__maximumSize = None
+        # type: (Any, Any) -> None
+        self.__minimumSize = None  # type: Optional[QSize]
+        self.__maximumSize = None  # type: Optional[QSize]
         super().__init__(*args, **kwargs)
 
-    def minimumSize(self):
-        """Reimplemented from `QBoxLayout.minimimSize`."""
+    def minimumSize(self):  # type: () -> QSize
+        """Reimplemented from `QBoxLayout.minimumSize`."""
         if self.__minimumSize is None:
             msize = super().minimumSize()
             # Extend the minimum size by including the minimum width of
@@ -240,7 +245,7 @@ class _ToolBoxLayout(QVBoxLayout):
 
         return self.__minimumSize
 
-    def maximumSize(self):
+    def maximumSize(self):  # type: () -> QSize
         """Reimplemented from `QBoxLayout.maximumSize`."""
         msize = super().maximumSize()
         # Allow the contents to grow horizontally (expand within the
@@ -251,7 +256,7 @@ class _ToolBoxLayout(QVBoxLayout):
         msize.setWidth(QWIDGETSIZE_MAX)
         return msize
 
-    def invalidate(self):
+    def invalidate(self):  # type: () -> None
         """Reimplemented from `QVBoxLayout.invalidate`."""
         self.__minimumSize = None
         self.__maximumSize = None
@@ -262,10 +267,12 @@ class ToolBox(QFrame):
     """
     A tool box widget.
     """
-    # Emitted when a tab is toggled.
-    tabToogled = Signal(int, bool)
+    # Signal emitted when a tab is toggled.
+    tabToggled = Signal(int, bool)
 
-    def setExclusive(self, exclusive):
+    __exclusive = False  # type: bool
+
+    def setExclusive(self, exclusive):  # type: (bool) -> None
         """
         Set exclusive tabs (only one tab can be open at a time).
         """
@@ -287,7 +294,7 @@ class ToolBox(QFrame):
                     if checked != page.action and page.action.isChecked():
                         page.action.trigger()
 
-    def exclusive(self):
+    def exclusive(self):  # type: () -> bool
         """
         Are the tabs in the toolbox exclusive.
         """
@@ -300,28 +307,27 @@ class ToolBox(QFrame):
                           doc="Exclusive tabs")
 
     def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QWidget], Any)-> None
         super().__init__(parent, **kwargs)
-
-        self.__pages = []
+        self.__pages = []  # type: List[_ToolBoxPage]
         self.__tabButtonHeight = -1
         self.__tabIconSize = QSize()
         self.__exclusive = False
-        self.__setupUi()
-
-    def __setupUi(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
 
         # Scroll area for the contents.
-        self.__scrollArea = \
-                _ToolBoxScrollArea(self, objectName="toolbox-scroll-area")
-
-        self.__scrollArea.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.__scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.__scrollArea.setSizePolicy(QSizePolicy.MinimumExpanding,
-                                        QSizePolicy.MinimumExpanding)
+        self.__scrollArea = QScrollArea(
+            self, objectName="toolbox-scroll-area",
+            sizePolicy=QSizePolicy(QSizePolicy.MinimumExpanding,
+                                   QSizePolicy.MinimumExpanding),
+            horizontalScrollBarPolicy=Qt.ScrollBarAlwaysOff,
+            widgetResizable=True,
+        )
+        sb = ScrollBar()
+        sb.styleChange.connect(self.updateGeometry)
+        self.__scrollArea.setVerticalScrollBar(sb)
         self.__scrollArea.setFrameStyle(QScrollArea.NoFrame)
-        self.__scrollArea.setWidgetResizable(True)
 
         # A widget with all of the contents.
         # The tabs/contents are placed in the layout inside this widget
@@ -342,15 +348,15 @@ class ToolBox(QFrame):
         self.setSizePolicy(QSizePolicy.Fixed,
                            QSizePolicy.MinimumExpanding)
 
-        self.__tabActionGroup = \
-                QActionGroup(self, objectName="toolbox-tab-action-group")
-
+        self.__tabActionGroup = QActionGroup(
+            self, objectName="toolbox-tab-action-group",
+        )
         self.__tabActionGroup.setExclusive(self.__exclusive)
-
         self.__actionMapper = QSignalMapper(self)
-        self.__actionMapper.mapped[QObject].connect(self.__onTabActionToogled)
+        self.__actionMapper.mappedObject.connect(self.__onTabActionToggled)
 
     def setTabButtonHeight(self, height):
+        # type: (int) -> None
         """
         Set the tab button height.
         """
@@ -360,68 +366,75 @@ class ToolBox(QFrame):
                 page.button.setFixedHeight(height)
 
     def tabButtonHeight(self):
+        # type: () -> int
         """
         Return the tab button height.
         """
         return self.__tabButtonHeight
 
     def setTabIconSize(self, size):
+        # type: (QSize) -> None
         """
         Set the tab button icon size.
         """
         if self.__tabIconSize != size:
-            self.__tabIconSize = size
+            self.__tabIconSize = QSize(size)
             for page in self.__pages:
                 page.button.setIconSize(size)
 
     def tabIconSize(self):
+        # type: () -> QSize
         """
         Return the tab icon size.
         """
-        return self.__tabIconSize
+        return QSize(self.__tabIconSize)
 
     def tabButton(self, index):
+        # type: (int) -> QAbstractButton
         """
         Return the tab button at `index`
         """
         return self.__pages[index].button
 
     def tabAction(self, index):
+        # type: (int) -> QAction
         """
         Return open/close action for the tab at `index`.
         """
         return self.__pages[index].action
 
-    def addItem(self, widget, text, icon=None, toolTip=None):
+    def addItem(self, widget, text, icon=QIcon(), toolTip=""):
+        # type: (QWidget, str, QIcon, str) -> int
         """
         Append the `widget` in a new tab and return its index.
 
         Parameters
         ----------
-        widget : :class:`QWidget`
+        widget : QWidget
             A widget to be inserted. The toolbox takes ownership
             of the widget.
-
         text : str
             Name/title of the new tab.
-
-        icon : :class:`QIcon`, optional
+        icon : QIcon
             An icon for the tab button.
-
-        toolTip : str, optional
+        toolTip : str
             Tool tip for the tab button.
 
+        Returns
+        -------
+        index : int
+            Index of the inserted tab
         """
         return self.insertItem(self.count(), widget, text, icon, toolTip)
 
-    def insertItem(self, index, widget, text, icon=None, toolTip=None):
+    def insertItem(self, index, widget, text, icon=QIcon(), toolTip=""):
+        # type: (int, QWidget, str, QIcon, str) -> int
         """
         Insert the `widget` in a new tab at position `index`.
 
         See also
         --------
         ToolBox.addItem
-
         """
         button = self.createTabButton(widget, text, icon, toolTip)
 
@@ -433,6 +446,7 @@ class ToolBox(QFrame):
         page = _ToolBoxPage(index, widget, button.defaultAction(), button)
         self.__pages.insert(index, page)
 
+        # update the indices __pages list
         for i in range(index + 1, self.count()):
             self.__pages[i] = self.__pages[i]._replace(index=i)
 
@@ -448,11 +462,14 @@ class ToolBox(QFrame):
         return index
 
     def removeItem(self, index):
+        # type: (int) -> None
         """
         Remove the widget at `index`.
 
-        .. note:: The widget hidden but is is not deleted.
-
+        Note
+        ----
+        The widget is hidden but is is not deleted. It is up to the caller to
+        delete it.
         """
         self.__contentsLayout.takeAt(2 * index + 1)
         self.__contentsLayout.takeAt(2 * index)
@@ -475,18 +492,21 @@ class ToolBox(QFrame):
         self.updateGeometry()
 
     def count(self):
+        # type: () -> int
         """
         Return the number of widgets inserted in the toolbox.
         """
         return len(self.__pages)
 
     def widget(self, index):
+        # type: (int) -> QWidget
         """
         Return the widget at `index`.
         """
         return self.__pages[index].widget
 
-    def createTabButton(self, widget, text, icon=None, toolTip=None):
+    def createTabButton(self, widget, text, icon=QIcon(), toolTip=""):
+        # type: (QWidget, str, QIcon, str) -> QAbstractButton
         """
         Create the tab button for `widget`.
         """
@@ -517,20 +537,31 @@ class ToolBox(QFrame):
         return button
 
     def ensureWidgetVisible(self, child, xmargin=50, ymargin=50):
+        # type: (QWidget, int, int) -> None
         """
         Scroll the contents so child widget instance is visible inside
         the viewport.
-
         """
         self.__scrollArea.ensureWidgetVisible(child, xmargin, ymargin)
 
     def sizeHint(self):
+        # type: () -> QSize
+        """
+        Reimplemented.
+        """
         hint = self.__contentsLayout.sizeHint()
 
         if self.count():
             # Compute max width of hidden widgets also.
             scroll = self.__scrollArea
-            scroll_w = scroll.verticalScrollBar().sizeHint().width()
+
+            # check if scrollbar is transient
+            scrollBar = self.__scrollArea.verticalScrollBar()
+            transient = scrollBar.style().styleHint(QStyle.SH_ScrollBar_Transient,
+                                                    widget=scrollBar)
+
+            scroll_w = scroll.verticalScrollBar().sizeHint().width() if not transient else 0
+
             frame_w = self.frameWidth() * 2 + scroll.frameWidth() * 2
             max_w = max([p.widget.sizeHint().width() for p in self.__pages])
             hint = QSize(max(max_w, hint.width()) + scroll_w + frame_w,
@@ -538,7 +569,8 @@ class ToolBox(QFrame):
 
         return QSize(200, 200).expandedTo(hint)
 
-    def __onTabActionToogled(self, action):
+    def __onTabActionToggled(self, action):
+        # type: (QAction) -> None
         page = find(self.__pages, action, key=attrgetter("action"))
         on = action.isChecked()
         page.widget.setVisible(on)
@@ -547,47 +579,40 @@ class ToolBox(QFrame):
         if index > 0:
             # Update the `previous` tab buttons style hints
             previous = self.__pages[index - 1].button
-            flag = QStyleOptionToolBox.NextIsSelected
-            if on:
-                previous.selected |= flag
-            else:
-                previous.selected &= ~flag
-
+            previous.selected = set_flag(
+                previous.selected, ToolBoxTabButton.NextIsSelected, on
+            )
             previous.update()
-
         if index < self.count() - 1:
             next = self.__pages[index + 1].button
-            flag = QStyleOptionToolBox.PreviousIsSelected
-            if on:
-                next.selected |= flag
-            else:
-                next.selected &= ~flag
-
+            next.selected = set_flag(
+                next.selected, ToolBoxTabButton.PreviousIsSelected, on
+            )
             next.update()
 
-        self.tabToogled.emit(index, on)
+        self.tabToggled.emit(index, on)
 
         self.__contentsLayout.invalidate()
 
     def __updateSelected(self):
+        # type: () -> None
         """Update the tab buttons selected style flags.
         """
         if self.count() == 0:
             return
 
-        opt = QStyleOptionToolBox
-
         def update(button, next_sel, prev_sel):
-            if next_sel:
-                button.selected |= opt.NextIsSelected
-            else:
-                button.selected &= ~opt.NextIsSelected
-
-            if prev_sel:
-                button.selected |= opt.PreviousIsSelected
-            else:
-                button.selected &= ~ opt.PreviousIsSelected
-
+            # type: (ToolBoxTabButton, bool, bool) -> None
+            button.selected = set_flag(
+                button.selected,
+                ToolBoxTabButton.NextIsSelected,
+                next_sel
+            )
+            button.selected = set_flag(
+                button.selected,
+                ToolBoxTabButton.PreviousIsSelected,
+                prev_sel
+            )
             button.update()
 
         if self.count() == 1:
@@ -600,33 +625,38 @@ class ToolBox(QFrame):
                        pages[i - 1].action.isChecked())
 
     def __updatePositions(self):
+        # type: () -> None
         """Update the tab buttons position style flags.
         """
         if self.count() == 0:
             return
         elif self.count() == 1:
-            self.__pages[0].button.position = QStyleOptionToolBox.OnlyOneTab
+            self.__pages[0].button.position = ToolBoxTabButton.OnlyOneTab
         else:
-            self.__pages[0].button.position = QStyleOptionToolBox.Beginning
-            self.__pages[-1].button.position = QStyleOptionToolBox.End
+            self.__pages[0].button.position = ToolBoxTabButton.Beginning
+            self.__pages[-1].button.position = ToolBoxTabButton.End
             for p in self.__pages[1:-1]:
-                p.button.position = QStyleOptionToolBox.Middle
+                p.button.position = ToolBoxTabButton.Middle
 
         for p in self.__pages:
             p.button.update()
+
+
+if typing.TYPE_CHECKING:
+    A = typing.TypeVar("A")
+    B = typing.TypeVar("B")
+    C = typing.TypeVar("C")
 
 
 def identity(arg):
     return arg
 
 
-def find(iterable, *what, **kwargs):
+def find(iterable, what, key=identity, predicate=eq):
+    # type: (Iterable[A], B, Callable[[A], C], Callable[[C, B], bool]) -> A
     """
-    find(iterable, [what, [key=None, [predicate=operator.eq]]])
+    find(iterable, what, [key=None, [predicate=operator.eq]])
     """
-    if what:
-        what = what[0]
-    key, predicate = kwargs.get("key", identity), kwargs.get("predicate", eq)
     for item in iterable:
         item_key = key(item)
         if predicate(item_key, what):

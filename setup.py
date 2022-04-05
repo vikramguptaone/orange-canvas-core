@@ -3,15 +3,18 @@ from setuptools import setup, find_packages
 
 NAME = "Orange-Canvas-Core"
 VERSION = "0.0.11"
+
 DESCRIPTION = "Core component of Orange Canvas"
-LONG_DESCRIPTION = open("README.txt", "rt").read()
+
+with open("README.rst", "rt", encoding="utf-8") as f:
+    LONG_DESCRIPTION = f.read()
 
 URL = "http://orange.biolab.si/"
 AUTHOR = "Bioinformatics Laboratory, FRI UL"
 AUTHOR_EMAIL = 'contact@orange.biolab.si'
 
 LICENSE = "GPLv3"
-DOWNLOAD_URL = 'https://github.org/ales-erjavec/orange-canvas'
+DOWNLOAD_URL = 'https://github.com/biolab/orange-canvas-core'
 PACKAGES = find_packages()
 
 PACKAGE_DATA = {
@@ -21,13 +24,15 @@ PACKAGE_DATA = {
 
 INSTALL_REQUIRES = (
     "setuptools",
-    "AnyQt",
+    "AnyQt>=0.1.0",
     "docutils",
-    "numpy",
-    "commonmark",
+    "commonmark>=0.8.1",
     "requests",
     "cachecontrol[filecache]",
     "pip>=18.0",
+    "dictdiffer",
+    "qasync",
+    "importlib_metadata; python_version<'3.8'",
 )
 
 
@@ -44,17 +49,16 @@ CLASSIFIERS = (
 )
 
 EXTRAS_REQUIRE = {
-    ':python_version=="3.4"': ["typing"],
     'DOCBUILD': ['sphinx', 'sphinx-rtd-theme'],
 }
 
 PROJECT_URLS = {
-    "Bug Reports": "https://github.com/ales-erjavec/orange-canvas/issues",
-    "Source": "https://github.com/ales-erjavec/orange-canvas/",
-    "Documentation": "https://pythonhosted.org/Orange-Canvas-Core/",
+    "Bug Reports": "https://github.com/biolab/orange-canvas-core/issues",
+    "Source": "https://github.com/biolab/orange-canvas-core/",
+    "Documentation": "https://orange-canvas-core.readthedocs.io/en/latest/",
 }
 
-PYTHON_REQUIRES = ">=3.4"
+PYTHON_REQUIRES = ">=3.6"
 
 if __name__ == "__main__":
     setup(
@@ -62,6 +66,7 @@ if __name__ == "__main__":
         version=VERSION,
         description=DESCRIPTION,
         long_description=LONG_DESCRIPTION,
+        long_description_content_type="text/x-rst",
         url=URL,
         author=AUTHOR,
         author_email=AUTHOR_EMAIL,

@@ -53,11 +53,16 @@ class TestScene(QAppTestCase):
         with self.assertRaises(ValueError):
             self.scene.add_node_item(cons_item)
 
+        a1 = one_desc.outputs[0]
+        a2 = negate_desc.inputs[0]
+        a3 = negate_desc.outputs[0]
+        a4 = cons_desc.inputs[0]
+
         # Add links
         link1 = self.scene.new_link_item(
-            one_item, "value", negate_item, "value")
+            one_item, a1, negate_item, a2)
         link2 = self.scene.new_link_item(
-            negate_item, "result", cons_item, "first")
+            negate_item, a3, cons_item, a4)
 
         link1a = self.scene.add_link_item(link1)
         link2a = self.scene.add_link_item(link2)
@@ -80,14 +85,14 @@ class TestScene(QAppTestCase):
 
         # And add one link again
         link1 = self.scene.new_link_item(
-            one_item, "value", negate_item, "value")
+            one_item, a1, negate_item, a2)
         link1 = self.scene.add_link_item(link1)
         self.assertSequenceEqual(self.scene.link_items(), [link1])
 
         self.assertTrue(one_item.outputAnchors())
         self.assertTrue(negate_item.inputAnchors())
 
-        self.app.exec_()
+        self.qWait()
 
     def test_scene_with_scheme(self):
         """Test scene through modifying the scheme.
@@ -145,7 +150,7 @@ class TestScene(QAppTestCase):
         test_scheme.add_link(link1)
         self.assertTrue(len(self.scene.link_items()) == 1)
         self.assertSequenceEqual(self.scene.link_items(), link_items)
-        self.app.exec_()
+        self.qWait()
 
     def test_scheme_construction(self):
         """Test construction (editing) of the scheme through the scene.
@@ -225,7 +230,7 @@ class TestScene(QAppTestCase):
         self.assertSequenceEqual(test_scheme.links,
                                  [link1, link2])
 
-        self.app.exec_()
+        self.qWait()
 
     def widget_desc(self):
         reg = small_testing_registry()

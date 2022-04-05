@@ -28,7 +28,9 @@ class TestLinksEditDialog(test.QAppTestCase):
         dlg.setLinks(links)
 
         self.assertSequenceEqual(dlg.links(), links)
-        status = dlg.exec_()
+        self.singleShot(50, dlg.close)
+
+        status = dlg.exec()
 
         self.assertTrue(dlg.links() == [] or dlg.links() == links)
 
@@ -42,7 +44,7 @@ class TestLinksEditDialog(test.QAppTestCase):
         view.show()
         view.resize(400, 300)
 
-        self.app.exec_()
+        self.qWait()
 
     def test_editlinksnode(self):
         reg = small_testing_registry()
@@ -65,4 +67,4 @@ class TestLinksEditDialog(test.QAppTestCase):
 
         view.show()
         view.resize(800, 300)
-        self.app.exec_()
+        self.qWait()

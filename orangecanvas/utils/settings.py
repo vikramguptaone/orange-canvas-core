@@ -5,16 +5,16 @@ Settings (`settings`)
 A more `dict` like interface for QSettings
 
 """
-
 import abc
 import logging
 
-from collections import namedtuple, MutableMapping
+import typing
+from typing import List, Dict, Tuple, Union, Any, Type, Optional
+from collections import namedtuple
+from collections.abc import MutableMapping
 
 from AnyQt.QtCore import QObject, QEvent, QCoreApplication, QSettings
 from AnyQt.QtCore import pyqtSignal as Signal
-
-_QObjectType = type(QObject)
 
 
 log = logging.getLogger(__name__)
@@ -65,24 +65,25 @@ class SettingChangedEvent(QEvent):
         return self.__oldValue
 
 
-def qt_to_mapped_type(value):
-    """
-    Try to convert a Qt value to the corresponding python mapped type
-    (i.e. QString to str, etc.).
-
-    """
-    return value
+_QObjectType = type(QObject)
 
 
-class QABCMeta(_QObjectType, abc.ABCMeta):
+class QABCMeta(_QObjectType, abc.ABCMeta):  # type: ignore # pylint: disable=all
     def __init__(self, name, bases, attr_dict):
         _QObjectType.__init__(self, name, bases, attr_dict)
         abc.ABCMeta.__init__(self, name, bases, attr_dict)
 
 
-class _pickledvalue(object):
+# Backward compatibility.
+# Settings used to store values, for which the explicit type
+# was not registered in default' slots, by wrapping it in a _pickledvalue, so
+# it would be pickled and unpickled when read from .ini files by PyQt.
+# But this creates a mess when reading the settings back with plain QSettings.
+class _pickledvalue:
+    value = ...
+
     def __init__(self, value):
-        self.value = value
+        raise RuntimeError("'_pickledvalue' instances should not be created")
 
 
 class Settings(QObject, MutableMapping, metaclass=QABCMeta):
@@ -95,11 +96,10 @@ class Settings(QObject, MutableMapping, metaclass=QABCMeta):
 
     def __init__(self, parent=None, defaults=(), path=None, store=None):
         super().__init__(parent)
-
         if store is None:
             store = QSettings()
 
-        path = path = (path or "").rstrip("/")
+        path = (path or "").rstrip("/")
 
         self.__path = path
         self.__defaults = dict([(slot.key, slot) for slot in defaults])
@@ -151,38 +151,18 @@ class Settings(QObject, MutableMapping, metaclass=QABCMeta):
             )
 
     def __value(self, fullkey, value_type):
-        typesafe = value_type is not None
-
         if value_type is None:
             value = self.__store.value(fullkey)
         else:
             try:
                 value = self.__store.value(fullkey, type=value_type)
-            except TypeError:
+            except (TypeError, RuntimeError):
                 # In case the value was pickled in a type unsafe mode
                 value = self.__store.value(fullkey)
-                typesafe = False
 
-        if not typesafe:
-            if isinstance(value, _pickledvalue):
-                value = value.value
-            else:
-                log.warning("value for key %r is not a '_pickledvalue' (%r),"
-                            "possible loss of type information.",
-                            fullkey,
-                            type(value))
-
+        if isinstance(value, _pickledvalue):  # back-compat
+            value = value.value
         return value
-
-    def __setValue(self, fullkey, value, value_type=None):
-        typesafe = value_type is not None
-        if not typesafe:
-            # value is stored in a _pickledvalue wrapper to force PyQt
-            # to store it in a pickled format so we don't lose the type
-            # TODO: Could check if QSettings.Format stores type info.
-            value = _pickledvalue(value)
-
-        self.__store.setValue(fullkey, value)
 
     def __getitem__(self, key):
         """
@@ -199,8 +179,10 @@ class Settings(QObject, MutableMapping, metaclass=QABCMeta):
 
         if self.__store.contains(fullkey):
             value = self.__value(fullkey, slot.value_type if slot else None)
-        else:
+        elif slot is not None:
             value = slot.default_value
+        else:
+            raise KeyError()
 
         return value
 
@@ -212,12 +194,9 @@ class Settings(QObject, MutableMapping, metaclass=QABCMeta):
             raise TypeError(key)
 
         fullkey = self.__key(key)
-        value_type = None
-
         if fullkey in self.__defaults:
             value_type = self.__defaults[fullkey].value_type
             if not isinstance(value, value_type):
-                value = qt_to_mapped_type(value)
                 if not isinstance(value, value_type):
                     raise TypeError("Expected {0!r} got {1!r}".format(
                                         value_type.__name__,
@@ -231,7 +210,7 @@ class Settings(QObject, MutableMapping, metaclass=QABCMeta):
             oldValue = None
             etype = SettingChangedEvent.SettingAdded
 
-        self.__setValue(fullkey, value, value_type)
+        self.__store.setValue(fullkey, value)
 
         QCoreApplication.sendEvent(
             self, SettingChangedEvent(etype, key, value, oldValue)
@@ -313,12 +292,6 @@ class Settings(QObject, MutableMapping, metaclass=QABCMeta):
     def get_default_slot(self, key):
         return self.__defaults[self.__key(key)]
 
-    def values(self):
-        """
-        Return a list over of all values in the settings.
-        """
-        return super().values(self)
-
     def customEvent(self, event):
         super().customEvent(event)
 
@@ -339,3 +312,111 @@ class Settings(QObject, MutableMapping, metaclass=QABCMeta):
                                         event.value(),
                                         event.oldValue())
                 )
+
+
+if typing.TYPE_CHECKING:  # pragma: no cover
+    _T = typing.TypeVar("_T")
+    #: Specification for an value in the return value of readArray
+    #: Can be single type or a tuple of (type, defaultValue) where default
+    #: value is used where a stored entry is missing.
+    ValueSpec = Union[Type[_T], Tuple[Type[_T], _T]]
+
+
+def QSettings_readArray(settings, key, scheme):
+    # type: (QSettings, str, Dict[str, ValueSpec]) -> List[Dict[str, _T]]
+    """
+    Read the whole array from a QSettings instance.
+
+    Parameters
+    ----------
+    settings : QSettings
+    key : str
+    scheme : Dict[str, ValueSpec]
+
+    Example
+    -------
+    >>> s = QSettings("./login.ini")
+    >>> QSettings_readArray(s, "array", {"username": str, "password": str})
+    [{"username": "darkhelmet", "password": "1234"}}
+    >>> QSettings_readArray(
+    ...    s, "array", {"username": str, "noexist": (str, "~||~")})
+    ...
+    [{"username": "darkhelmet", "noexist": "~||~"}}
+    """
+    items = []
+    count = settings.beginReadArray(key)
+
+    def normalize_spec(spec):
+        # type: (ValueSpec) -> Tuple[Type[_T], Optional[_T]]
+        if isinstance(spec, tuple):
+            if len(spec) != 2:
+                raise ValueError("len(spec) != 2")
+            type_, default = spec
+        else:
+            type_, default = spec, None
+        return type_, default
+
+    specs = {
+        name: normalize_spec(spec) for name, spec in scheme.items()
+    }
+    for i in range(count):
+        settings.setArrayIndex(i)
+        item = {}
+        for key, (type_, default) in specs.items():
+            value = settings.value(key, type=type_, defaultValue=default)
+            item[key] = value
+        items.append(item)
+    settings.endArray()
+    return items
+
+
+def QSettings_writeArray(settings, key, values):
+    # type: (QSettings, str, List[Dict[str, Any]]) -> None
+    """
+    Write an array of values to a QSettings instance.
+
+    Parameters
+    ----------
+    settings : QSettings
+    key : str
+    values : List[Dict[str, Any]]
+
+    Examples
+    --------
+    >>> s = QSettings("./login.ini")
+    >>> QSettings_writeArray(
+    ...     s, "array", [{"username": "darkhelmet", "password": "1234"}]
+    ... )
+    """
+    settings.beginWriteArray(key, len(values))
+    for i in range(len(values)):
+        settings.setArrayIndex(i)
+        for key_, val in values[i].items():
+            settings.setValue(key_, val)
+    settings.endArray()
+
+
+def QSettings_writeArrayItem(settings, key, index, item, arraysize=-1):
+    # type: (QSettings, str, int, Dict[str, Any], int) -> None
+    """
+    Write/update an array item at index.
+
+    Parameters
+    ----------
+    settings : QSettings
+    key : str
+    index : int
+    item : Dict[str, Any]
+    arraysize : int
+        The full array size. Note that the array will be truncated to this
+        size.
+    """
+    if arraysize < 0:
+        arraysize = settings.beginReadArray(key)
+        settings.endArray()
+
+    settings.beginWriteArray(key, arraysize)
+    settings.setArrayIndex(index)
+    for key_, val in item.items():
+        settings.setValue(key_, val)
+    settings.endArray()

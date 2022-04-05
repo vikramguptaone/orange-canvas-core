@@ -2,8 +2,10 @@
 Test for canvas toolbox.
 """
 
-from AnyQt.QtWidgets import QWidget, QToolBar, QTextEdit, QSplitter
-from AnyQt.QtCore import Qt, QTimer
+from AnyQt.QtWidgets import (
+    QWidget, QToolBar, QTextEdit, QSplitter, QApplication
+)
+from AnyQt.QtCore import Qt, QTimer, QPoint
 
 from ...registry import tests as registry_tests
 from ...registry.qt import QtWidgetRegistry
@@ -11,7 +13,7 @@ from ...gui.dock import CollapsibleDockWidget
 
 from ..canvastooldock import (
     WidgetToolBox, CanvasToolDock, SplitterResizer, QuickCategoryToolbar,
-    CategoryPopupMenu
+    CategoryPopupMenu, popup_position_from_source, widget_popup_geometry
 )
 
 from ...gui import test
@@ -44,7 +46,7 @@ class TestCanvasDockWidget(test.QAppTestCase):
         dock.setCollapsedWidget(toolbar)
 
         dock.show()
-        self.app.exec_()
+        self.qWait()
 
     def test_canvas_tool_dock(self):
         reg = registry_tests.small_testing_registry()
@@ -54,7 +56,7 @@ class TestCanvasDockWidget(test.QAppTestCase):
         dock.toolbox.setModel(reg.model())
 
         dock.show()
-        self.app.exec_()
+        self.qWait()
 
     def test_splitter_resizer(self):
         w = QSplitter(orientation=Qt.Vertical)
@@ -71,10 +73,12 @@ class TestCanvasDockWidget(test.QAppTestCase):
                 resizer.close()
 
         w.show()
-        timer = QTimer(resizer, interval=1000)
+        timer = QTimer(resizer, interval=100)
         timer.timeout.connect(toogle)
         timer.start()
-        self.app.exec_()
+        toogle()
+        self.qWait()
+        timer.stop()
 
     def test_category_toolbar(self):
         reg = registry_tests.small_testing_registry()
@@ -83,17 +87,32 @@ class TestCanvasDockWidget(test.QAppTestCase):
         w = QuickCategoryToolbar()
         w.setModel(reg.model())
         w.show()
-
-        self.app.exec_()
+        self.qWait()
 
 
 class TestPopupMenu(test.QAppTestCase):
     def test(self):
         reg = registry_tests.small_testing_registry()
         reg = QtWidgetRegistry(reg, parent=self.app)
-
-        item = reg.model().item(0)
+        model = reg.model()
 
         w = CategoryPopupMenu()
-        w.setCategoryItem(item)
-        w.exec_()
+        w.setModel(model)
+        w.setRootIndex(model.index(0, 0))
+        w.popup()
+        self.qWait()
+
+    def test_popup_position(self):
+        popup = CategoryPopupMenu()
+        screen = popup.screen()
+        screen_geom = screen.availableGeometry()
+        popup.setMinimumHeight(screen_geom.height() + 20)
+        w = QWidget()
+        w.setGeometry(
+            screen_geom.left() + 100, screen_geom.top() + 100, 20, 20
+        )
+        pos = popup_position_from_source(popup, w)
+        self.assertTrue(screen_geom.contains(pos))
+        pos = QPoint(screen_geom.top() - 100, screen_geom.left() - 100)
+        geom = widget_popup_geometry(pos, popup)
+        self.assertEqual(screen_geom.intersected(geom), geom)

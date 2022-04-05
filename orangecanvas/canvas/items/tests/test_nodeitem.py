@@ -1,10 +1,12 @@
-from AnyQt.QtCore import QTimer
+from AnyQt.QtCore import QTimer, Qt
 from AnyQt.QtWidgets import QGraphicsEllipseItem
 from AnyQt.QtGui import QPainterPath
+from AnyQt.QtTest import QSignalSpy, QTest
 
 from .. import NodeItem, AnchorPoint, NodeAnchorItem
 
 from . import TestItems
+from ....registry import InputSignal
 from ....registry.tests import small_testing_registry
 
 
@@ -79,9 +81,11 @@ class TestNodeItem(TestItems):
 
         one_item.setInfoMessage("I am back.")
         nb_item.setProcessingState(1)
+        negate_item.setProcessingState(1)
+        negate_item.shapeItem.startSpinner()
 
         def progress():
-            p = (nb_item.progress() + 1) % 100
+            p = (nb_item.progress() + 25) % 100
             nb_item.setProgress(p)
 
             if p > 50:
@@ -93,11 +97,11 @@ class TestNodeItem(TestItems):
 
             negate_item.setAnchorRotation(50 - p)
 
-        timer = QTimer(nb_item, interval=10)
+        timer = QTimer(nb_item, interval=5)
         timer.start()
         timer.timeout.connect(progress)
-
-        self.app.exec_()
+        self.qWait()
+        timer.stop()
 
     def test_nodeanchors(self):
         one_item = NodeItem()
@@ -126,10 +130,11 @@ class TestNodeItem(TestItems):
         anchor = one_item.newOutputAnchor()
         self.assertIsInstance(anchor, AnchorPoint)
 
-        self.app.exec_()
+        self.qWait()
 
     def test_anchoritem(self):
         anchoritem = NodeAnchorItem(None)
+        anchoritem.setAnimationEnabled(False)
         self.scene.addItem(anchoritem)
 
         path = QPainterPath()
@@ -157,9 +162,9 @@ class TestNodeItem(TestItems):
 
         self.assertSequenceEqual(anchoritem.anchorPoints(), [anchor, anchor1])
 
-        self.assertSequenceEqual(anchoritem.anchorPositions(), [0.5, 0.5])
-        anchoritem.setAnchorPositions([0.5, 0.0])
+        self.assertSequenceEqual(anchoritem.anchorPositions(), [2/3, 1/3])
 
+        anchoritem.setAnchorPositions([0.5, 0.0])
         self.assertSequenceEqual(anchoritem.anchorPositions(), [0.5, 0.0])
 
         def advance():
@@ -167,8 +172,54 @@ class TestNodeItem(TestItems):
             t = [(t + 0.05) % 1.0 for t in t]
             anchoritem.setAnchorPositions(t)
 
-        timer = QTimer(anchoritem, interval=20)
+        timer = QTimer(anchoritem, interval=10)
         timer.start()
         timer.timeout.connect(advance)
 
-        self.app.exec_()
+        self.qWait()
+        timer.stop()
+
+        anchoritem.setAnchorOpen(True)
+        anchoritem.setHovered(True)
+        self.assertEqual(*[
+            p.scenePos() for p in anchoritem.anchorPoints()
+        ])
+        anchoritem.setAnchorOpen(False)
+        self.assertNotEqual(*[
+            p.scenePos() for p in anchoritem.anchorPoints()
+        ])
+        anchoritem.setAnchorOpen(False)
+        anchoritem.setHovered(True)
+        self.assertNotEqual(*[
+            p.scenePos() for p in anchoritem.anchorPoints()
+        ])
+
+        anchoritem = NodeAnchorItem(None)
+
+        anchoritem.setSignals([
+            InputSignal("first", "object", "set_first"),
+            InputSignal("second", "object", "set_second")
+        ])
+        self.assertListEqual(anchoritem._NodeAnchorItem__pathStroker.dashPattern(),
+                             list(anchoritem._NodeAnchorItem__unanchoredDash))
+        anchoritem.setAnchorOpen(True)
+        anchoritem.setHovered(True)
+        self.assertListEqual(anchoritem._NodeAnchorItem__pathStroker.dashPattern(),
+                             list(anchoritem._NodeAnchorItem__channelDash))
+
+    def test_title_edit(self):
+        item = NodeItem()
+        item.setWidgetDescription(self.one_desc)
+        self.scene.addItem(item)
+        item.setTitle("AA")
+        item.setStatusMessage("BB")
+        self.assertIn("BB", item.captionTextItem.toPlainText())
+        spy = QSignalSpy(item.titleEditingFinished)
+        item.editTitle()
+        self.assertEqual(len(spy), 0)
+        self.assertEqual("AA", item.captionTextItem.toPlainText())
+        QTest.keyClicks(self.view.viewport(), "CCCC")
+        QTest.keyClick(self.view.viewport(), Qt.Key_Enter)
+        self.assertEqual(len(spy), 1)
+        self.assertIn("BB", item.captionTextItem.toPlainText())
+        self.assertIn("CCCC", item.captionTextItem.toPlainText())

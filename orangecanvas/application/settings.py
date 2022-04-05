@@ -5,23 +5,25 @@ User settings/preference dialog
 """
 import sys
 import logging
+import warnings
+from functools import cmp_to_key
 from collections import namedtuple
-
-from .. import config
-from ..utils.settings import SettingChangedEvent
-
-from ..utils.propertybindings import (
-    AbstractBoundProperty, PropertyBinding, BindingManager
-)
 
 from AnyQt.QtWidgets import (
     QWidget, QMainWindow, QComboBox, QCheckBox, QListView, QTabWidget,
     QToolBar, QAction, QStackedWidget, QVBoxLayout, QHBoxLayout,
-    QFormLayout, QSizePolicy, QDialogButtonBox, QLineEdit, QLabel
-)
+    QFormLayout, QSizePolicy, QDialogButtonBox, QLineEdit, QLabel,
+    QStyleFactory, QLayout)
 from AnyQt.QtGui import QStandardItemModel, QStandardItem
 from AnyQt.QtCore import (
-    Qt, QEventLoop, QAbstractItemModel, QModelIndex, QSettings
+    Qt, QEventLoop, QAbstractItemModel, QModelIndex, QSettings,
+    Property,
+    Signal)
+
+from .. import config
+from ..utils.settings import SettingChangedEvent
+from ..utils.propertybindings import (
+    AbstractBoundProperty, PropertyBinding, BindingManager
 )
 
 log = logging.getLogger(__name__)
@@ -182,6 +184,29 @@ def container_widget_helper(orientation=Qt.Vertical, spacing=None, margin=0):
 _State = namedtuple("_State", ["visible", "position"])
 
 
+class FormLayout(QFormLayout):
+    """
+    When adding a row to a QFormLayout, wherein the field is a layout
+    (or a widget with a layout), the label's height is too large to look pretty.
+    This subclass sets the label a fixed height to match the first item in
+    the layout.
+    """
+    def addRow(self, *args):
+        if len(args) != 2:
+            return super().addRow(*args)
+        label, field = args
+        if not isinstance(field, QLayout) and field.layout() is None:
+            return super().addRow(label, field)
+
+        layout = field if isinstance(field, QLayout) else field.layout()
+        widget = layout.itemAt(0).widget()
+        height = widget.sizeHint().height()
+        if isinstance(label, str):
+            label = QLabel(label)
+        label.setFixedHeight(height)
+        return super().addRow(label, field)
+
+
 class UserSettingsDialog(QMainWindow):
     """
     A User Settings/Defaults dialog.
@@ -209,8 +234,9 @@ class UserSettingsDialog(QMainWindow):
         """Set up the UI.
         """
         if self.__macUnified:
-            self.tab = QToolBar()
-
+            self.tab = QToolBar(
+                floatable=False, movable=False, allowedAreas=Qt.TopToolBarArea,
+            )
             self.addToolBar(Qt.TopToolBarArea, self.tab)
             self.setUnifiedTitleAndToolBarOnMac(True)
 
@@ -245,7 +271,7 @@ class UserSettingsDialog(QMainWindow):
         self.addTab(tab, self.tr("General"),
                     toolTip=self.tr("General Options"))
 
-        form = QFormLayout()
+        form = FormLayout()
         tab.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         nodes = QWidget(self, objectName="nodes")
@@ -258,9 +284,18 @@ class UserSettingsDialog(QMainWindow):
             toolTip=self.tr("Enable shadow and ping animations for nodes "
                             "in the workflow.")
         )
+        cb_anchors = QCheckBox(
+            self.tr("Open anchors on hover"),
+            objectName="open-anchors-on-hover",
+            toolTip=self.tr(
+                "Open/expand node anchors on mouse hover (if unchecked the "
+                "anchors are expanded when Shift key is pressed)."
+            ),
+        )
         self.bind(cb_anim, "checked", "schemeedit/enable-node-animations")
+        self.bind(cb_anchors, "checked", "schemeedit/open-anchors-on-hover")
         nodes.layout().addWidget(cb_anim)
-
+        nodes.layout().addWidget(cb_anchors)
         form.addRow(self.tr("Nodes"), nodes)
 
         links = QWidget(self, objectName="links")
@@ -284,33 +319,39 @@ class UserSettingsDialog(QMainWindow):
         quickmenu.setLayout(QVBoxLayout())
         quickmenu.layout().setContentsMargins(0, 0, 0, 0)
 
-        cb1 = QCheckBox(self.tr("On double click"),
+        cb1 = QCheckBox(self.tr("Open on double click"),
                         toolTip=self.tr("Open quick menu on a double click "
                                         "on an empty spot in the canvas"))
 
-        cb2 = QCheckBox(self.tr("On right click"),
+        cb2 = QCheckBox(self.tr("Open on right click"),
                         toolTip=self.tr("Open quick menu on a right click "
                                         "on an empty spot in the canvas"))
 
-        cb3 = QCheckBox(self.tr("On space key press"),
-                        toolTip=self.tr("On Space key press while the mouse"
-                                        "is hovering over the canvas."))
+        cb3 = QCheckBox(self.tr("Open on space key press"),
+                        toolTip=self.tr("Open quick menu on Space key press "
+                                        "while the mouse is hovering over the canvas."))
 
-        cb4 = QCheckBox(self.tr("On any key press"),
-                        toolTip=self.tr("On any key press while the mouse"
-                                        "is hovering over the canvas."))
+        cb4 = QCheckBox(self.tr("Open on any key press"),
+                        toolTip=self.tr("Open quick menu on any key press "
+                                        "while the mouse is hovering over the canvas."))
+
+        cb5 = QCheckBox(self.tr("Show categories"),
+                        toolTip=self.tr("In addition to searching, allow filtering "
+                                        "by categories."))
 
         self.bind(cb1, "checked", "quickmenu/trigger-on-double-click")
         self.bind(cb2, "checked", "quickmenu/trigger-on-right-click")
         self.bind(cb3, "checked", "quickmenu/trigger-on-space-key")
         self.bind(cb4, "checked", "quickmenu/trigger-on-any-key")
+        self.bind(cb5, "checked", "quickmenu/show-categories")
 
         quickmenu.layout().addWidget(cb1)
         quickmenu.layout().addWidget(cb2)
         quickmenu.layout().addWidget(cb3)
         quickmenu.layout().addWidget(cb4)
+        quickmenu.layout().addWidget(cb5)
 
-        form.addRow(self.tr("Open quick menu on"), quickmenu)
+        form.addRow(self.tr("Quick menu"), quickmenu)
 
         startup = QWidget(self, objectName="startup-group")
         startup.setLayout(QVBoxLayout())
@@ -320,13 +361,18 @@ class UserSettingsDialog(QMainWindow):
                               objectName="show-splash-screen")
 
         cb_welcome = QCheckBox(self.tr("Show welcome screen"), self,
-                                objectName="show-welcome-screen")
+                               objectName="show-welcome-screen")
+
+        cb_crash = QCheckBox(self.tr("Load crashed scratch workflows"), self,
+                             objectName="load-crashed-workflows")
 
         self.bind(cb_splash, "checked", "startup/show-splash-screen")
         self.bind(cb_welcome, "checked", "startup/show-welcome-screen")
+        self.bind(cb_crash, "checked", "startup/load-crashed-workflows")
 
         startup.layout().addWidget(cb_splash)
         startup.layout().addWidget(cb_welcome)
+        startup.layout().addWidget(cb_crash)
 
         form.addRow(self.tr("On startup"), startup)
 
@@ -343,16 +389,19 @@ class UserSettingsDialog(QMainWindow):
         form.addRow(self.tr("Tool box"), toolbox)
         tab.setLayout(form)
 
+        # Style tab
+        tab = StyleConfigWidget()
+        self.addTab(tab, self.tr("&Style"), toolTip="Application style")
+        self.bind(tab, "selectedStyle_", "application-style/style-name")
+        self.bind(tab, "selectedPalette_", "application-style/palette")
+
         # Output Tab
         tab = QWidget()
         self.addTab(tab, self.tr("Output"),
                     toolTip="Output Redirection")
 
-        form = QFormLayout()
+        form = FormLayout()
 
-        box = QWidget()
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
         combo = QComboBox()
         combo.addItems([self.tr("Critical"),
                         self.tr("Error"),
@@ -360,9 +409,7 @@ class UserSettingsDialog(QMainWindow):
                         self.tr("Info"),
                         self.tr("Debug")])
         self.bind(combo, "currentIndex", "logging/level")
-        layout.addWidget(combo)
-        box.setLayout(layout)
-        form.addRow(self.tr("Logging"), box)
+        form.addRow(self.tr("Logging"), combo)
 
         box = QWidget()
         layout = QVBoxLayout()
@@ -379,7 +426,9 @@ class UserSettingsDialog(QMainWindow):
         # Categories Tab
         tab = QWidget()
         layout = QVBoxLayout()
-        view = QListView()
+        view = QListView(
+            editTriggers=QListView.NoEditTriggers
+        )
         from .. import registry
         reg = registry.global_registry()
         model = QStandardItemModel()
@@ -411,14 +460,14 @@ class UserSettingsDialog(QMainWindow):
         self.addTab(tab, self.tr("Add-ons"),
                     toolTip="Settings related to add-on installation")
 
-        form = QFormLayout()
+        form = FormLayout()
         conda = QWidget(self, objectName="conda-group")
         conda.setLayout(QVBoxLayout())
         conda.layout().setContentsMargins(0, 0, 0, 0)
 
         cb_conda_install = QCheckBox(self.tr("Install add-ons with conda"), self,
-                                     objectName="allow-conda-experimental")
-        self.bind(cb_conda_install, "checked", "add-ons/allow-conda-experimental")
+                                     objectName="allow-conda")
+        self.bind(cb_conda_install, "checked", "add-ons/allow-conda")
         conda.layout().addWidget(cb_conda_install)
 
         form.addRow(self.tr("Conda"), conda)
@@ -435,7 +484,7 @@ class UserSettingsDialog(QMainWindow):
         self.addTab(tab, self.tr("Network"),
                     toolTip="Settings related to networking")
 
-        form = QFormLayout()
+        form = FormLayout()
         line_edit_http_proxy = QLineEdit()
         self.bind(line_edit_http_proxy, "text", "network/http-proxy")
         form.addRow("HTTP proxy:", line_edit_http_proxy)
@@ -472,6 +521,12 @@ class UserSettingsDialog(QMainWindow):
             if icon:
                 self.tab.setTabIcon(i, icon)
 
+    def setCurrentIndex(self, index: int):
+        if self.__macUnified:
+            self.stack.setCurrentIndex(index)
+        else:
+            self.tab.setCurrentIndex(index)
+
     def widget(self, index):
         if self.__macUnified:
             return self.stack.widget(index)
@@ -507,13 +562,19 @@ class UserSettingsDialog(QMainWindow):
                 log.error("Error reseting %r", source.propertyName,
                           exc_info=True)
 
-    def exec_(self):
+    def exec(self):
         self.__loop = QEventLoop()
         self.show()
-        status = self.__loop.exec_()
+        status = self.__loop.exec()
         self.__loop = None
         refresh_proxies()
         return status
+
+    def exec_(self, *args, **kwargs):
+        warnings.warn(
+            "exec_ is deprecated, use exec", DeprecationWarning, stacklevel=2
+        )
+        return self.exec(*args, **kwargs)
 
     def hideEvent(self, event):
         super().hideEvent(event)
@@ -524,6 +585,120 @@ class UserSettingsDialog(QMainWindow):
     def __macOnToolBarAction(self, action):
         index = action.data()
         self.stack.setCurrentIndex(index)
+
+
+class StyleConfigWidget(QWidget):
+    DisplayNames = {
+        "windowsvista": "Windows (default)",
+        "macintosh": "macOS (default)",
+        "windows": "MS Windows 9x",
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._current_palette = ""
+        form = FormLayout()
+        styles = QStyleFactory.keys()
+        styles = sorted(styles, key=cmp_to_key(
+            lambda a, b:
+                1 if a.lower() == "windows" and b.lower() == "fusion" else
+                (-1 if a.lower() == "fusion" and b.lower() == "windows" else 0)
+        ))
+        styles = [
+            (self.DisplayNames.get(st.lower(), st.capitalize()), st)
+            for st in styles
+        ]
+        # Default style with empty userData key so it cleared in
+        # persistent settings, allowing for default style resolution
+        # on application star.
+        styles = [("Default", "")] + styles
+        self.style_cb = style_cb = QComboBox(objectName="style-cb")
+        for name, key in styles:
+            self.style_cb.addItem(name, userData=key)
+
+        style_cb.currentIndexChanged.connect(self._style_changed)
+
+        self.colors_cb = colors_cb = QComboBox(objectName="palette-cb")
+        colors_cb.addItem("Default", userData="")
+        colors_cb.addItem("Breeze Light", userData="breeze-light")
+        colors_cb.addItem("Breeze Dark", userData="breeze-dark")
+        colors_cb.addItem("Zion Reversed", userData="zion-reversed")
+        colors_cb.addItem("Dark", userData="dark")
+
+        form.addRow("Style", style_cb)
+        form.addRow("Color theme", colors_cb)
+        label = QLabel(
+            "<small>Changes will be applied on next application startup.</small>",
+            enabled=False,
+        )
+        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        form.addRow(label)
+        self.setLayout(form)
+        self._update_colors_enabled_state()
+
+        style_cb.currentIndexChanged.connect(self.selectedStyleChanged)
+        colors_cb.currentIndexChanged.connect(self.selectedPaletteChanged)
+
+    def _style_changed(self):
+        self._update_colors_enabled_state()
+
+    def _update_colors_enabled_state(self):
+        current = self.style_cb.currentData(Qt.UserRole)
+        enable = current is not None and current.lower() in ("fusion", "windows")
+        self._set_palette_enabled(enable)
+
+    def _set_palette_enabled(self, state: bool):
+        cb = self.colors_cb
+        if cb.isEnabled() != state:
+            cb.setEnabled(state)
+            if not state:
+                current = cb.currentData(Qt.UserRole)
+                self._current_palette = current
+                cb.setCurrentIndex(-1)
+            else:
+                index = cb.findData(self._current_palette, Qt.UserRole)
+                if index == -1:
+                    index = 0
+                cb.setCurrentIndex(index)
+
+    def selectedStyle(self) -> str:
+        """Return the current selected style key."""
+        key = self.style_cb.currentData()
+        return key if key is not None else ""
+
+    def setSelectedStyle(self, style: str) -> None:
+        """Set the current selected style key."""
+        idx = self.style_cb.findData(style, Qt.DisplayRole, Qt.MatchFixedString)
+        if idx == -1:
+            idx = 0  # select the default style
+        self.style_cb.setCurrentIndex(idx)
+
+    selectedStyleChanged = Signal()
+    selectedStyle_ = Property(
+        str, selectedStyle, setSelectedStyle,
+        notify=selectedStyleChanged
+    )
+
+    def selectedPalette(self) -> str:
+        """The current selected palette key."""
+        key = self.colors_cb.currentData(Qt.UserRole)
+        return key if key is not None else ""
+
+    def setSelectedPalette(self, key: str) -> None:
+        """Set the current selected palette key."""
+        if not self.colors_cb.isEnabled():
+            self._current_palette = key
+            return
+        idx = self.colors_cb.findData(key, Qt.UserRole, Qt.MatchFixedString)
+        if idx == -1:
+            idx = 0  # select the default color theme
+        self.colors_cb.setCurrentIndex(idx)
+
+    selectedPaletteChanged = Signal()
+    selectedPalette_ = Property(
+        str, selectedPalette, setSelectedPalette,
+        notify=selectedPaletteChanged
+    )
 
 
 def category_state(cat, settings):

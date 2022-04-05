@@ -6,9 +6,10 @@ Link Editor
 An Dialog to edit links between two nodes in the scheme.
 
 """
+import typing
+from typing import cast, List, Tuple, Optional, Any, Union
 
 from collections import namedtuple
-
 from xml.sax.saxutils import escape
 
 from AnyQt.QtWidgets import (
@@ -16,7 +17,7 @@ from AnyQt.QtWidgets import (
     QGraphicsView, QGraphicsWidget, QGraphicsRectItem,
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsLayoutItem,
     QGraphicsLinearLayout, QGraphicsGridLayout, QGraphicsPixmapItem,
-    QGraphicsDropShadowEffect, QSizePolicy, QGraphicsItem,
+    QGraphicsDropShadowEffect, QSizePolicy, QGraphicsItem, QWidget,
     QWIDGETSIZE_MAX
 )
 from AnyQt.QtGui import (
@@ -30,6 +31,11 @@ from ..scheme import compatible_channels
 from ..registry import InputSignal, OutputSignal
 
 from ..resources import icon_loader
+from ..utils import type_str
+
+if typing.TYPE_CHECKING:
+    from ..scheme import SchemeNode
+    IOPair = Tuple[OutputSignal, InputSignal]
 
 
 class EditLinksDialog(QDialog):
@@ -37,16 +43,16 @@ class EditLinksDialog(QDialog):
     A dialog for editing links.
 
     >>> dlg = EditLinksDialog()
-    >>> dlg.setNodes(file_node, test_learners_node)
-    >>> dlg.setLinks([(file_node.output_channel("Data"),
-    ...               (test_learners_node.input_channel("Data")])
-    >>> if dlg.exec_() == EditLinksDialog.Accpeted:
+    >>> dlg.setNodes(source_node, sink_node)
+    >>> dlg.setLinks([(source_node.output_channel("Data"),
+    ...                sink_node.input_channel("Data"))])
+    >>> if dlg.exec() == EditLinksDialog.Accepted:
     ...     new_links = dlg.links()
     ...
-
     """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QWidget], Any) -> None
+        super().__init__(parent, **kwargs)
 
         self.setModal(True)
 
@@ -86,6 +92,7 @@ class EditLinksDialog(QDialog):
         self.setSizeGripEnabled(False)
 
     def setNodes(self, source_node, sink_node):
+        # type: (SchemeNode, SchemeNode) -> None
         """
         Set the source/sink nodes (:class:`.SchemeNode` instances)
         between which to edit the links.
@@ -96,6 +103,7 @@ class EditLinksDialog(QDialog):
         self.scene.editWidget.setNodes(source_node, sink_node)
 
     def setLinks(self, links):
+        # type: (List[IOPair]) -> None
         """
         Set a list of links to display between the source and sink
         nodes. The `links` is a list of (`OutputSignal`, `InputSignal`)
@@ -106,6 +114,7 @@ class EditLinksDialog(QDialog):
         self.scene.editWidget.setLinks(links)
 
     def links(self):
+        # type: () -> List[IOPair]
         """
         Return the links between the source and sink node.
         """
@@ -113,14 +122,21 @@ class EditLinksDialog(QDialog):
 
     def __onGeometryChanged(self):
         size = self.scene.editWidget.size()
-        left, top, right, bottom = self.getContentsMargins()
-        self.view.setFixedSize(size.toSize() + \
-                               QSize(left + right + 4, top + bottom + 4))
+        m = self.contentsMargins()
+        self.view.setFixedSize(
+            size.toSize() + QSize(m.left() + m.right() + 4,
+                                  m.top() + m.bottom() + 4)
+        )
         self.view.setSceneRect(self.scene.editWidget.geometry())
 
 
-def find_item_at(scene, pos, order=Qt.DescendingOrder, type=None,
-                 name=None):
+def find_item_at(
+        scene,  # type: QGraphicsScene
+        pos,    # type: QPointF
+        order=Qt.DescendingOrder,  # type: Qt.SortOrder
+        type=None,   # type: Optional[type]
+        name=None,   # type: Optional[str]
+):  # type: (...) -> Optional[QGraphicsItem]
     """
     Find an object in a :class:`QGraphicsScene` `scene` at `pos`.
     If `type` is not `None` the it must specify  the type of the item.
@@ -179,7 +195,7 @@ class LinksEditWidget(QGraphicsWidget):
         self.sinkNodeWidget = None
         self.sinkNodeTitle = None
 
-        self.__links = []
+        self.__links = []  # type: List[IOPair]
 
         self.__textItems = []
         self.__iconItems = []
@@ -282,7 +298,7 @@ class LinksEditWidget(QGraphicsWidget):
                 eventPos = event.pos()
                 line.setLine(start.x(), start.y(), eventPos.x(), eventPos.y())
 
-                pen = QPen(self.palette().color(QPalette.Foreground), 4)
+                pen = QPen(self.palette().color(QPalette.WindowText), 4)
                 pen.setCapStyle(Qt.RoundCap)
                 line.setPen(pen)
                 line.show()
@@ -568,6 +584,8 @@ class EditLinksNode(QGraphicsWidget):
         self.layout().setAlignment(self.__channelLayout,
                                    Qt.AlignVCenter | channel_alignemnt)
 
+        self.node: Optional[SchemeNode] = None
+        self.channels: Union[List[InputSignal], List[OutputSignal]] = []
         if node is not None:
             self.setSchemeNode(node)
 
@@ -603,13 +621,14 @@ class EditLinksNode(QGraphicsWidget):
         return QIcon(self.__icon)
 
     def setSchemeNode(self, node):
+        # type: (SchemeNode) -> None
         """
         Set an instance of `SchemeNode`. The widget will be initialized
         with its icon and channels.
 
         """
         self.node = node
-
+        channels: Union[List[InputSignal], List[OutputSignal]]
         if self.__direction == Qt.LeftToRight:
             channels = node.output_channels()
         else:
@@ -640,8 +659,8 @@ class EditLinksNode(QGraphicsWidget):
 
         self.channelAnchors = []
         grid = self.__channelLayout
-
         for i, channel in enumerate(channels):
+            channel = cast(Union[InputSignal, OutputSignal], channel)
             text = label_template.format(align=align,
                                          name=escape(channel.name))
 
@@ -649,7 +668,8 @@ class EditLinksNode(QGraphicsWidget):
             text_item.setHtml(text)
             text_item.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             text_item.setToolTip(
-                escape(getattr(channel, 'description', channel.type)))
+                escape(getattr(channel, 'description', type_str(channel.types)))
+            )
 
             grid.addItem(text_item, i, label_row,
                          alignment=label_alignment)

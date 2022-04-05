@@ -1,5 +1,7 @@
 import enum
 import itertools
+from functools import partial
+
 import logging
 import sys
 import traceback
@@ -11,17 +13,19 @@ from typing import Iterable, Dict, Deque, Optional, List, Tuple
 from AnyQt.QtCore import Qt, QObject, QEvent, QTimer, QCoreApplication
 from AnyQt.QtCore import Slot, Signal
 from AnyQt.QtGui import QKeySequence
-from AnyQt.QtWidgets import QWidget, QLabel, QShortcut, QAction
+from AnyQt.QtWidgets import QWidget, QLabel, QAction
 
-from orangecanvas.scheme import (
-    SchemeNode, Scheme, NodeEvent, SchemeLink, LinkEvent
-)
-from orangecanvas.scheme.events import WorkflowEvent, WorkflowEnvChanged
+from orangecanvas.resources import icon_loader
+from orangecanvas.scheme import SchemeNode, Scheme, NodeEvent, LinkEvent
+from orangecanvas.scheme.events import WorkflowEvent
 from orangecanvas.scheme.node import UserMessage
 
 log = logging.getLogger(__name__)
 
 __all__ = ["WidgetManager"]
+
+Workflow = Scheme
+Node = SchemeNode
 
 
 class Item:
@@ -44,26 +48,37 @@ class WidgetManager(QObject):
     This is an abstract class, subclassed MUST reimplement at least
     :func:`create_widget_for_node` and :func:`delete_widget_for_node`.
 
-    The widgets created with `create_widget_for_node` will automatically
+    The widgets created with :func:`create_widget_for_node` will automatically
     receive dispatched events:
 
-        * :data:`WorkflowEvent.InputLinkAdded` - when a new input link is added to
-          the workflow.
-        * :data:`LinkEvent.InputLinkRemoved` - when a input link is removed
-        * :data:`LinkEvent.OutputLinkAdded` - when a new output link is added to
-          the workflow
-        * :data:`LinkEvent.InputLinkRemoved` - when a output link is removed
-        * :data:`WorkflowEnvEvent.WorkflowEnvironmentChanged` - when the
+        * :attr:`.WorkflowEvent.InputLinkAdded` - when a new input link is
+          added to the workflow.
+        * :attr:`.WorkflowEvent.InputLinkRemoved` - when a input link is
+          removed.
+        * :attr:`.WorkflowEvent.OutputLinkAdded` - when a new output link is
+          added to the workflow.
+        * :attr:`.WorkflowEvent.OutputLinkRemoved` - when a output link is
+          removed.
+        * :attr:`.WorkflowEvent.InputLinkStateChange` - when the input link's
+          runtime state changes.
+        * :attr:`.WorkflowEvent.OutputLinkStateChange` - when the output link's
+          runtime state changes.
+        * :attr:`.WorkflowEvent.NodeStateChange` - when the node's runtime
+          state changes.
+        * :attr:`.WorkflowEvent.WorkflowEnvironmentChange` - when the
           workflow environment changes.
 
     .. seealso:: :func:`.Scheme.add_link()`, :func:`Scheme.remove_link`,
-                 :func:`.Scheme.runtime_env`
+                 :func:`.Scheme.runtime_env`, :class:`NodeEvent`,
+                 :class:`LinkEvent`
     """
     #: A new QWidget was created and added by the manager.
     widget_for_node_added = Signal(SchemeNode, QWidget)
 
     #: A QWidget was removed, hidden and will be deleted when appropriate.
     widget_for_node_removed = Signal(SchemeNode, QWidget)
+
+    __init_queue = None  # type: Deque[SchemeNode]
 
     class CreationPolicy(enum.Enum):
         """
@@ -86,13 +101,13 @@ class WidgetManager(QObject):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.__workflow = None  # type: Optional[Scheme]
-        self.__creation_policy = WidgetManager.Normal
+        self.__creation_policy = WidgetManager.OnDemand
         self.__float_widgets_on_top = False
 
         self.__item_for_node = {}  # type: Dict[SchemeNode, Item]
         self.__item_for_widget = {}  # type: Dict[QWidget, Item]
 
-        self.__init_queue = deque()  # type: Deque[SchemeNode]
+        self.__init_queue = deque()
 
         self.__init_timer = QTimer(self, singleShot=True)
         self.__init_timer.timeout.connect(self.__process_init_queue)
@@ -115,9 +130,6 @@ class WidgetManager(QObject):
                 self.__remove_node(node)
             self.__workflow.node_added.disconnect(self.__on_node_added)
             self.__workflow.node_removed.disconnect(self.__on_node_removed)
-            self.__workflow.link_added.disconnect(self.__on_link_added)
-            self.__workflow.link_removed.disconnect(self.__on_link_removed)
-            self.__workflow.runtime_env_changed.disconnect(self.__on_env_changed)
             self.__workflow.removeEventFilter(self)
 
         self.__workflow = workflow
@@ -126,17 +138,12 @@ class WidgetManager(QObject):
             self.__on_node_added, Qt.UniqueConnection)
         workflow.node_removed.connect(
             self.__on_node_removed, Qt.UniqueConnection)
-        workflow.link_added.connect(
-            self.__on_link_added, Qt.UniqueConnection)
-        workflow.link_removed.connect(
-            self.__on_link_removed, Qt.UniqueConnection)
-        workflow.runtime_env_changed.connect(
-            self.__on_env_changed, Qt.UniqueConnection)
         workflow.installEventFilter(self)
         for node in workflow.nodes:
             self.__add_node(node)
 
     def workflow(self):
+        # type: () -> Optional[Workflow]
         return self.__workflow
 
     scheme = workflow
@@ -179,6 +186,7 @@ class WidgetManager(QObject):
         raise NotImplementedError()
 
     def delete_widget_for_node(self, node, widget):
+        # type: (SchemeNode, QWidget) -> None
         """
         Remove and delete widget for node.
 
@@ -211,6 +219,9 @@ class WidgetManager(QObject):
         item = self.__item_for_node.get(node)
         if item is not None:
             return
+        if self.__workflow is None:
+            return
+
         if node not in self.__workflow.nodes:
             return
 
@@ -233,30 +244,62 @@ class WidgetManager(QObject):
                 text="<pre>" + escape(text) + "</pre>"
             )
             item.errorwidget = errorwidget
-            node.set_state_message(UserMessage(text, UserMessage.Error, 0))
-            return
+            node.set_state_message(
+                UserMessage(text, UserMessage.Error, "")
+            )
+            raise
         else:
             item.widget = w
             self.__item_for_widget[w] = item
 
         self.__set_float_on_top_flag(w)
 
+        if w.windowIcon().isNull():
+            desc = node.description
+            w.setWindowIcon(
+                icon_loader.from_description(desc).get(desc.icon)
+            )
+        if not w.windowTitle():
+            w.setWindowTitle(node.title)
+
         w.installEventFilter(self.__activation_monitor)
-        # Up shortcut (activate/open parent)
-        up_shortcut = QShortcut(
-            QKeySequence(Qt.ControlModifier + Qt.Key_Up), w)
-        up_shortcut.activated.connect(self.__on_activate_parent)
+        raise_canvas = QAction(
+            self.tr("Raise Canvas to Front"), w,
+            objectName="action-canvas-raise-canvas",
+            toolTip=self.tr("Raise containing canvas workflow window"),
+            shortcut=QKeySequence("Ctrl+Up")
+        )
+        raise_canvas.triggered.connect(self.__on_activate_parent)
+        raise_descendants = QAction(
+            self.tr("Raise Descendants"), w,
+            objectName="action-canvas-raise-descendants",
+            toolTip=self.tr("Raise all immediate descendants of this node"),
+            shortcut=QKeySequence("Ctrl+Shift+Right")
+        )
+        raise_descendants.triggered.connect(
+            partial(self.__on_raise_descendants, node)
+        )
+        raise_ancestors = QAction(
+            self.tr("Raise Ancestors"), w,
+            objectName="action-canvas-raise-ancestors",
+            toolTip=self.tr("Raise all immediate ancestors of this node"),
+            shortcut=QKeySequence("Ctrl+Shift+Left")
+        )
+        raise_ancestors.triggered.connect(
+            partial(self.__on_raise_ancestors, node)
+        )
+        w.addActions([raise_canvas, raise_descendants, raise_ancestors])
 
         # send all the post creation notification events
         workflow = self.__workflow
         assert workflow is not None
         inputs = workflow.find_links(sink_node=node)
-        for link in inputs:
-            ev = LinkEvent(LinkEvent.InputLinkAdded, link)
+        for i, link in enumerate(inputs):
+            ev = LinkEvent(LinkEvent.InputLinkAdded, link, i)
             QCoreApplication.sendEvent(w, ev)
         outputs = workflow.find_links(source_node=node)
-        for link in outputs:
-            ev = LinkEvent(LinkEvent.OutputLinkAdded, link)
+        for i, link in enumerate(outputs):
+            ev = LinkEvent(LinkEvent.OutputLinkAdded, link, i)
             QCoreApplication.sendEvent(w, ev)
 
         self.widget_for_node_added.emit(node, w)
@@ -266,26 +309,31 @@ class WidgetManager(QObject):
         """
         Ensure that the widget for node is created.
         """
+        if self.__workflow is None:
+            return
         if node not in self.__workflow.nodes:
             return
         item = self.__item_for_node.get(node)
         if item is None:
             self.__add_widget_for_node(node)
 
-    def __on_node_added(self, node):  # type: (SchemeNode) -> None
+    def __on_node_added(self, node):
+        # type: (SchemeNode) -> None
         assert self.__workflow is not None
         assert node in self.__workflow.nodes
         assert node not in self.__item_for_node
         self.__add_node(node)
 
-    def __add_node(self, node): # type: (SchemeNode) -> None
+    def __add_node(self, node):
+        # type: (SchemeNode) -> None
         # add node for tracking
         node.installEventFilter(self)
         if self.__creation_policy == WidgetManager.Immediate:
             self.ensure_created(node)
-        elif self.__creation_policy == WidgetManager.Normal:
+        else:
             self.__init_queue.append(node)
-            self.__init_timer.start()
+            if self.__creation_policy == WidgetManager.Normal:
+                self.__init_timer.start()
 
     def __on_node_removed(self, node):  # type: (SchemeNode) -> None
         assert self.__workflow is not None
@@ -313,37 +361,16 @@ class WidgetManager(QObject):
 
     @Slot()
     def __process_init_queue(self):
-        log.debug("__process_init_queue")
-        while self.__init_queue:
+        if self.__init_queue:
             node = self.__init_queue.popleft()
+            assert self.__workflow is not None
             assert node in self.__workflow.nodes
-            self.ensure_created(node)
-
-    def __on_link_added(self, link):  # type: (SchemeLink) -> None
-        assert link.source_node in self.__workflow.nodes
-        assert link.sink_node in self.__workflow.nodes
-        source = self.__item_for_widget.get(link.source_node)
-        sink = self.__item_for_widget.get(link.sink_node)
-        # notify the node gui of an added link
-        if source is not None:
-            ev = LinkEvent(LinkEvent.OutputLinkAdded, link)
-            QCoreApplication.sendEvent(source.widget, ev)
-        if sink is not None:
-            ev = LinkEvent(LinkEvent.InputLinkAdded, link)
-            QCoreApplication.sendEvent(sink.widget, ev)
-
-    def __on_link_removed(self, link):  # type: (SchemeLink) -> None
-        assert link.source_node in self.__workflow.nodes
-        assert link.sink_node in self.__workflow.nodes
-        source = self.__item_for_widget.get(link.source_node)
-        sink = self.__item_for_widget.get(link.sink_node)
-        # notify the node gui of an removed link
-        if source is not None:
-            ev = LinkEvent(LinkEvent.OutputLinkRemoved, link)
-            QCoreApplication.sendEvent(source.widget, ev)
-        if sink is not None:
-            ev = LinkEvent(LinkEvent.InputLinkRemoved, link)
-            QCoreApplication.sendEvent(sink.widget, ev)
+            log.debug("__process_init_queue: '%s'", node.title)
+            try:
+                self.ensure_created(node)
+            finally:
+                if self.__init_queue:
+                    self.__init_timer.start()
 
     def __mark_activated(self, widget):  # type: (QWidget) ->  None
         # Update the tracked stacking order for `widget`
@@ -399,6 +426,9 @@ class WidgetManager(QObject):
         """
         Save current open window arrangement.
         """
+        if self.__workflow is None:
+            return []
+
         workflow = self.__workflow  # type: Scheme
         state = []
         for node in workflow.nodes:  # type: SchemeNode
@@ -410,15 +440,15 @@ class WidgetManager(QObject):
                 data = self.save_widget_geometry(node, item.widget)
                 state.append((stackorder, node, data))
 
-        state = [(node, data)
-                 for _, node, data in sorted(state, key=lambda t: t[0])]
-        return state
+        return [(node, data)
+                for _, node, data in sorted(state, key=lambda t: t[0])]
 
     def restore_window_state(self, state):
-        # type: (List[Tuple[SchemeNode, bytes]]) -> None
+        # type: (List[Tuple[Node, bytes]]) -> None
         """
         Restore the window state.
         """
+        assert self.__workflow is not None
         workflow = self.__workflow  # type: Scheme
         visible = {node for node, _ in state}
         # first hide all other widgets
@@ -432,11 +462,11 @@ class WidgetManager(QObject):
         # restore state for visible group; windows are stacked as they appear
         # in the state list.
         w = None
-        for node, state in filter(lambda t: t[0] in allnodes, state):
+        for node, node_state in filter(lambda t: t[0] in allnodes, state):
             w = self.widget_for_node(node)  # also create it if needed
             if w is not None:
                 w.show()
-                self.restore_widget_geometry(node, w, state)
+                self.restore_widget_geometry(node, w, node_state)
                 w.raise_()
                 self.__mark_activated(w)
 
@@ -461,6 +491,34 @@ class WidgetManager(QObject):
         The default implementation does nothing.
         """
         return False
+
+    @Slot(SchemeNode)
+    def __on_raise_ancestors(self, node):
+        # type: (SchemeNode) -> None
+        """
+        Raise all the ancestor widgets of `widget`.
+        """
+        item = self.__item_for_node.get(node)
+        if item is not None:
+            scheme = self.scheme()
+            assert scheme is not None
+            ancestors = [self.__item_for_node.get(p)
+                         for p in scheme.parents(item.node)]
+            self.__raise_and_activate(filter(None, reversed(ancestors)))
+
+    @Slot(SchemeNode)
+    def __on_raise_descendants(self, node):
+        # type: (SchemeNode) -> None
+        """
+        Raise all the descendants widgets of `widget`.
+        """
+        item = self.__item_for_node.get(node)
+        if item is not None:
+            scheme = self.scheme()
+            assert scheme is not None
+            descendants = [self.__item_for_node.get(p)
+                           for p in scheme.children(item.node)]
+            self.__raise_and_activate(filter(None, reversed(descendants)))
 
     def __raise_and_activate(self, items):
         # type: (Iterable[Item]) -> None
@@ -500,12 +558,36 @@ class WidgetManager(QObject):
 
     def eventFilter(self, recv, event):
         # type: (QObject, QEvent) -> bool
-        if event.type() == NodeEvent.NodeActivateRequest \
-                and isinstance(recv, SchemeNode):
-            self.__activate_widget_for_node(recv)
+        if isinstance(recv, SchemeNode):
+            if event.type() == NodeEvent.NodeActivateRequest:
+                self.__activate_widget_for_node(recv)
+            self.__dispatch_events(recv, event)
+        elif event.type() == WorkflowEvent.WorkflowEnvironmentChange \
+                and recv is self.__workflow:
+            for node in self.__item_for_node:
+                self.__dispatch_events(node, event)
         return False
 
+    def __dispatch_events(self, node: Node, event: QEvent) -> None:
+        """
+        Dispatch relevant workflow events to the GUI widget
+        """
+        if event.type() in (
+            WorkflowEvent.InputLinkAdded,
+            WorkflowEvent.InputLinkRemoved,
+            WorkflowEvent.InputLinkStateChange,
+            WorkflowEvent.OutputLinkAdded,
+            WorkflowEvent.OutputLinkRemoved,
+            WorkflowEvent.OutputLinkStateChange,
+            WorkflowEvent.NodeStateChange,
+            WorkflowEvent.WorkflowEnvironmentChange,
+        ):
+            item = self.__item_for_node.get(node)
+            if item is not None and item.widget is not None:
+                QCoreApplication.sendEvent(item.widget, event)
+
     def __set_float_on_top_flag(self, widget):
+        # type: (QWidget) -> None
         """Set or unset widget's float on top flag"""
         should_float_on_top = self.__float_widgets_on_top
         float_on_top = bool(widget.windowFlags() & Qt.WindowStaysOnTopHint)
@@ -524,13 +606,6 @@ class WidgetManager(QObject):
         # Changing window flags hid the widget
         if widget_was_visible:
             widget.show()
-
-    def __on_env_changed(self, key, newvalue, oldvalue):
-        # Notify widgets of a runtime environment change
-        for item in self.__item_for_node.values():
-            if item.widget is not None:
-                ev = WorkflowEnvChanged(key, newvalue, oldvalue)
-                QCoreApplication.sendEvent(item.widget, ev)
 
     def actions_for_context_menu(self, node):
         # type: (SchemeNode) -> List[QAction]

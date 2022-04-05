@@ -1,92 +1,110 @@
 """
 A widget containing a grid of clickable actions/buttons.
-
 """
-from collections import namedtuple, deque
+import sys
+from collections import deque
+
+from typing import NamedTuple, List, Iterable, Optional, Any, Union
 
 from AnyQt.QtWidgets import (
-    QFrame, QAction, QToolButton, QGridLayout,  QSizePolicy,
-    QStyleOptionToolButton, QStylePainter, QStyle
+    QFrame, QAction, QToolButton, QGridLayout, QSizePolicy,
+    QStyleOptionToolButton, QStylePainter, QStyle, QApplication,
+    QWidget
 )
-from AnyQt.QtGui import QFontMetrics
+from AnyQt.QtGui import (
+    QFont, QFontMetrics, QActionEvent, QPaintEvent, QResizeEvent,
+)
 from AnyQt.QtCore import Qt, QObject, QSize, QEvent, QSignalMapper
-from AnyQt.QtCore import pyqtSignal as Signal
+from AnyQt.QtCore import Signal, Slot
 
-from . import utils
+from orangecanvas.registry import WidgetDescription
 
-_ToolGridSlot = namedtuple(
-    "_ToolGridSlot",
-    ["button",
-     "action",
-     "row",
-     "column"
-     ]
+__all__ = [
+    "ToolGrid"
+]
+
+_ToolGridSlot = NamedTuple(
+    "_ToolGridSlot", (
+        ("button", QToolButton),
+        ("action", QAction),
+        ("row", int),
+        ("column", int),
     )
+)
 
 
-class _ToolGridButton(QToolButton):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+def qfont_scaled(font, factor):
+    # type: (QFont, float) -> QFont
+    scaled = QFont(font)
+    if font.pointSizeF() != -1:
+        scaled.setPointSizeF(font.pointSizeF() * factor)
+    elif font.pixelSize() != -1:
+        scaled.setPixelSize(int(font.pixelSize() * factor))
+    return scaled
+
+
+class ToolGridButton(QToolButton):
+    def __init__(self, parent=None, **kwargs):
+        # type: (Optional[QWidget], Any) -> None
+        super().__init__(parent, **kwargs)
         self.__text = ""
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        if sys.platform != "darwin":
+            font = QApplication.font("QWidget")
+            self.setFont(qfont_scaled(font, 0.85))
+            self.setAttribute(Qt.WA_SetFont, False)
 
     def actionEvent(self, event):
+        # type: (QActionEvent) -> None
         super().actionEvent(event)
         if event.type() == QEvent.ActionChanged or \
                 event.type() == QEvent.ActionAdded:
             self.__textLayout()
 
     def resizeEvent(self, event):
+        # type: (QResizeEvent) -> None
         super().resizeEvent(event)
         self.__textLayout()
 
     def __textLayout(self):
-        fm = QFontMetrics(self.font())
+        # type:  () -> None
+        fm = self.fontMetrics()
+        desc = self.defaultAction().data()
+        if isinstance(desc, WidgetDescription) and desc.short_name:
+            self.__text = desc.short_name
+            return
         text = self.defaultAction().text()
-        words = deque(text.split())
-
-        lines = []
-        curr_line = ""
-        curr_line_word_count = 0
+        words = text.split()
 
         option = QStyleOptionToolButton()
         option.initFrom(self)
 
         margin = self.style().pixelMetric(QStyle.PM_ButtonMargin, option, self)
-        width = self.width() - 2 * margin
+        min_width = self.width() - 2 * margin
 
-        while words:
-            w = words.popleft()
+        lines = []
 
-            if curr_line_word_count:
-                line_extended = " ".join([curr_line, w])
-            else:
-                line_extended = w
+        if fm.boundingRect(" ".join(words)).width() <= min_width or len(words) <= 1:
+            lines = [" ".join(words)]
+        else:
+            best_w, best_l = sys.maxsize, ['', '']
+            for i in range(1, len(words)):
+                l1 = " ".join(words[:i])
+                l2 = " ".join(words[i:])
+                width = max(
+                    fm.boundingRect(l1).width(),
+                    fm.boundingRect(l2).width()
+                )
+                if width < best_w:
+                    best_w = width
+                    best_l = [l1, l2]
+            lines = best_l
 
-            line_w = fm.boundingRect(line_extended).width()
-
-            if line_w >= width:
-                if curr_line_word_count == 0 or len(lines) == 1:
-                    # A single word that is too long must be elided.
-                    # Also if the text overflows 2 lines
-                    # Warning: hardcoded max lines
-                    curr_line = fm.elidedText(line_extended, Qt.ElideRight,
-                                              width)
-                    curr_line = curr_line
-                else:
-                    # Put the word back
-                    words.appendleft(w)
-
-                lines.append(curr_line)
-                curr_line = ""
-                curr_line_word_count = 0
-                if len(lines) == 2:
-                    break
-            else:
-                curr_line = line_extended
-                curr_line_word_count += 1
-
-        if curr_line:
-            lines.append(curr_line)
+        # elide the end of each line if too long
+        lines = [
+            fm.elidedText(l, Qt.ElideRight, self.width() - margin)
+            for l in lines
+        ]
 
         text = "\n".join(lines)
         text = text.replace('&', '&&')  # Need escaped ampersand to show
@@ -94,14 +112,36 @@ class _ToolGridButton(QToolButton):
         self.__text = text
 
     def paintEvent(self, event):
+        # type: (QPaintEvent) -> None
         p = QStylePainter(self)
         opt = QStyleOptionToolButton()
         self.initStyleOption(opt)
-        if self.__text:
-            # Replace the text
-            opt.text = self.__text
         p.drawComplexControl(QStyle.CC_ToolButton, opt)
         p.end()
+
+    def initStyleOption(self, option):
+        # type: (QStyleOptionToolButton) -> None
+        super().initStyleOption(option)
+        if self.__text:
+            option.text = self.__text
+
+    def sizeHint(self):
+        # type: () -> QSize
+        opt = QStyleOptionToolButton()
+        self.initStyleOption(opt)
+        style = self.style()
+        csize = opt.iconSize  # type: QSize
+        fm = opt.fontMetrics  # type: QFontMetrics
+        margin = style.pixelMetric(QStyle.PM_ButtonMargin)
+        # content size is:
+        #   * vertical: icon + margin + 2 * font ascent
+        #   * horizontal: icon * 3 / 2
+
+        csize.setHeight(csize.height() + margin + 2 * fm.lineSpacing())
+        csize.setWidth(csize.width() * 3 // 2)
+        size = style.sizeFromContents(
+            QStyle.CT_ToolButton, opt, csize, self)
+        return size
 
 
 class ToolGrid(QFrame):
@@ -117,78 +157,108 @@ class ToolGrid(QFrame):
         Parent widget.
     columns : int
         Number of columns in the grid layout.
-    buttonSize : :class:`QSize`, optional
+    buttonSize : QSize
         Size of tool buttons in the grid.
-    iconSize : :class:`QSize`, optional
+    iconSize : QSize
         Size of icons in the buttons.
     toolButtonStyle : :class:`Qt.ToolButtonStyle`
         Tool button style.
-
     """
-
+    #: Signal emitted when an action is triggered
     actionTriggered = Signal(QAction)
+    #: Signal emitted when an action is hovered
     actionHovered = Signal(QAction)
 
-    def __init__(self, parent=None, columns=4, buttonSize=None,
-                 iconSize=None, toolButtonStyle=Qt.ToolButtonTextUnderIcon):
-        super().__init__(parent)
+    def __init__(self,
+                 parent=None, columns=4, buttonSize=QSize(),
+                 iconSize=QSize(), toolButtonStyle=Qt.ToolButtonTextUnderIcon,
+                 **kwargs):
+        # type: (Optional[QWidget], int, QSize, QSize, Qt.ToolButtonStyle, Any) -> None
+        sizePolicy = kwargs.pop("sizePolicy", None)  # type: Optional[QSizePolicy]
+        super().__init__(parent, **kwargs)
 
-        if buttonSize is not None:
-            buttonSize = QSize(buttonSize)
-
-        if iconSize is not None:
-            iconSize = QSize(iconSize)
+        if buttonSize is None:
+            buttonSize = QSize()
+        if iconSize is None:
+            iconSize = QSize()
 
         self.__columns = columns
-        self.__buttonSize = buttonSize or QSize(50, 50)
-        self.__iconSize = iconSize or QSize(26, 26)
+        self.__buttonSize = QSize(buttonSize)
+        self.__iconSize = QSize(iconSize)
         self.__toolButtonStyle = toolButtonStyle
 
-        self.__gridSlots = []
+        self.__gridSlots = []  # type: List[_ToolGridSlot]
         self.__mapper = QSignalMapper()
-        self.__mapper.mapped[QObject].connect(self.__onClicked)
+        self.__mapper.mappedObject.connect(self.__onClicked)
 
-        self.__setupUi()
-
-    def __setupUi(self):
         layout = QGridLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.setSizeConstraint(QGridLayout.SetFixedSize)
         self.setLayout(layout)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.MinimumExpanding)
+        if sizePolicy is None:
+            self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.MinimumExpanding)
+            self.setAttribute(Qt.WA_WState_OwnSizePolicy, True)
+        else:
+            self.setSizePolicy(sizePolicy)
 
     def setButtonSize(self, size):
+        # type: (QSize) -> None
         """
         Set the button size.
         """
         if self.__buttonSize != size:
-            self.__buttonSize = size
+            self.__buttonSize = QSize(size)
             for slot in self.__gridSlots:
                 slot.button.setFixedSize(size)
 
     def buttonSize(self):
+        # type: () -> QSize
         """
         Return the button size.
         """
         return QSize(self.__buttonSize)
 
     def setIconSize(self, size):
+        # type: (QSize) -> None
         """
         Set the button icon size.
+
+        The default icon size is style defined.
         """
         if self.__iconSize != size:
-            self.__iconSize = size
+            self.__iconSize = QSize(size)
+            size = self.__effectiveIconSize()
             for slot in self.__gridSlots:
                 slot.button.setIconSize(size)
 
     def iconSize(self):
+        # type: () -> QSize
         """
-        Return the icon size
+        Return the icon size. If no size is set a default style defined size
+        is returned.
         """
-        return QSize(self.__iconSize)
+        return self.__effectiveIconSize()
+
+    def __effectiveIconSize(self):
+        # type: () -> QSize
+        if not self.__iconSize.isValid():
+            opt = QStyleOptionToolButton()
+            opt.initFrom(self)
+            s = self.style().pixelMetric(QStyle.PM_LargeIconSize, opt, None)
+            return QSize(s, s)
+        else:
+            return QSize(self.__iconSize)
+
+    def changeEvent(self, event):
+        # type: (QEvent) -> None
+        if event.type() == QEvent.StyleChange:
+            size = self.__effectiveIconSize()
+            for item in self.__gridSlots:
+                item.button.setIconSize(size)
+        super().changeEvent(event)
 
     def setToolButtonStyle(self, style):
+        # type: (Qt.ToolButtonStyle) -> None
         """
         Set the tool button style.
         """
@@ -198,12 +268,14 @@ class ToolGrid(QFrame):
                 slot.button.setToolButtonStyle(style)
 
     def toolButtonStyle(self):
+        # type: () -> Qt.ToolButtonStyle
         """
         Return the tool button style.
         """
         return self.__toolButtonStyle
 
     def setColumnCount(self, columns):
+        # type: (int) -> None
         """
         Set the number of button/action columns.
         """
@@ -212,12 +284,14 @@ class ToolGrid(QFrame):
             self.__relayout()
 
     def columns(self):
+        # type: () -> int
         """
         Return the number of columns in the grid.
         """
         return self.__columns
 
     def clear(self):
+        # type: () -> None
         """
         Clear all actions/buttons.
         """
@@ -226,6 +300,7 @@ class ToolGrid(QFrame):
         self.__gridSlots = []
 
     def insertAction(self, before, action):
+        # type: (Union[QAction, int], QAction) -> None
         """
         Insert a new action at the position currently occupied
         by `before` (can also be an index).
@@ -236,7 +311,6 @@ class ToolGrid(QFrame):
             Position where the `action` should be inserted.
         action : :class:`QAction`
             Action to insert
-
         """
         if isinstance(before, int):
             actions = list(self.actions())
@@ -249,6 +323,7 @@ class ToolGrid(QFrame):
         return super().insertAction(before, action)
 
     def setActions(self, actions):
+        # type: (Iterable[QAction]) -> None
         """
         Clear the grid and add `actions`.
         """
@@ -258,6 +333,7 @@ class ToolGrid(QFrame):
             self.addAction(action)
 
     def buttonForAction(self, action):
+        # type: (QAction) -> QToolButton
         """
         Return the :class:`QToolButton` instance button for `action`.
         """
@@ -266,28 +342,29 @@ class ToolGrid(QFrame):
         return self.__gridSlots[index].button
 
     def createButtonForAction(self, action):
+        # type: (QAction) -> QToolButton
         """
         Create and return a :class:`QToolButton` for action.
         """
-        button = _ToolGridButton(self)
+        button = ToolGridButton(self)
         button.setDefaultAction(action)
 
         if self.__buttonSize.isValid():
             button.setFixedSize(self.__buttonSize)
-        if self.__iconSize.isValid():
-            button.setIconSize(self.__iconSize)
-
+        button.setIconSize(self.__effectiveIconSize())
         button.setToolButtonStyle(self.__toolButtonStyle)
         button.setProperty("tool-grid-button", True)
         return button
 
     def count(self):
+        # type: () -> int
         """
         Return the number of buttons/actions in the grid.
         """
         return len(self.__gridSlots)
 
     def actionEvent(self, event):
+        # type: (QActionEvent) -> None
         super().actionEvent(event)
 
         if event.type() == QEvent.ActionAdded:
@@ -300,9 +377,8 @@ class ToolGrid(QFrame):
             self.__removeActionButton(event.action())
 
     def __insertActionButton(self, index, action):
-        """Create a button for the action and add it to the layout
-        at index.
-
+        # type: (int, QAction) -> None
+        """Create a button for the action and add it to the layout at index.
         """
         self.__shiftGrid(index, 1)
         button = self.createButtonForAction(action)
@@ -310,10 +386,9 @@ class ToolGrid(QFrame):
         row = index // self.__columns
         column = index % self.__columns
 
-        self.layout().addWidget(
-            button, row, column,
-            Qt.AlignLeft | Qt.AlignTop
-        )
+        layout = self.layout()
+        assert isinstance(layout, QGridLayout)
+        layout.addWidget(button, row, column)
 
         self.__gridSlots.insert(
             index, _ToolGridSlot(button, action, row, column)
@@ -324,6 +399,7 @@ class ToolGrid(QFrame):
         button.installEventFilter(self)
 
     def __removeActionButton(self, action):
+        # type: (QAction) -> None
         """Remove the button for the action from the layout and delete it.
         """
         actions = [slot.action for slot in self.__gridSlots]
@@ -339,9 +415,14 @@ class ToolGrid(QFrame):
         slot.button.deleteLater()
 
     def __shiftGrid(self, start, count=1):
+        # type: (int, int) -> None
         """Shift all buttons starting at index `start` by `count` cells.
         """
-        button_count = self.layout().count()
+        layout = self.layout()
+        assert isinstance(layout, QGridLayout)
+        button_count = layout.count()
+        columns = self.__columns
+
         direction = 1 if count >= 0 else -1
         if direction == 1:
             start, end = button_count - 1, start - 1
@@ -349,47 +430,54 @@ class ToolGrid(QFrame):
             start, end = start, button_count
 
         for index in range(start, end, -direction):
-            item = self.layout().itemAtPosition(index / self.__columns,
-                                                index % self.__columns)
+            item = layout.itemAtPosition(
+                index // columns, index % columns
+            )
             if item:
                 button = item.widget()
                 new_index = index + count
-                self.layout().addWidget(button, new_index / self.__columns,
-                                        new_index % self.__columns,
-                                        Qt.AlignLeft | Qt.AlignTop)
+                layout.addWidget(
+                    button, new_index // columns, new_index % columns,
+                )
 
     def __relayout(self):
+        # type: () -> None
         """Relayout the buttons.
         """
-        for i in reversed(range(self.layout().count())):
-            self.layout().takeAt(i)
+        layout = self.layout()
+        assert isinstance(layout, QGridLayout)
 
-        self.__gridSlots = [_ToolGridSlot(slot.button, slot.action,
-                                          i / self.__columns,
-                                          i % self.__columns)
-                            for i, slot in enumerate(self.__gridSlots)]
+        for i in reversed(range(layout.count())):
+            layout.takeAt(i)
 
+        self.__gridSlots = [
+            _ToolGridSlot(slot.button, slot.action,
+                          i // self.__columns, i % self.__columns)
+            for i, slot in enumerate(self.__gridSlots)
+        ]
         for slot in self.__gridSlots:
-            self.layout().addWidget(slot.button, slot.row, slot.column,
-                                    Qt.AlignLeft | Qt.AlignTop)
+            layout.addWidget(slot.button, slot.row, slot.column)
 
     def __indexOf(self, button):
+        # type: (QWidget) -> int
         """Return the index of button widget.
         """
         buttons = [slot.button for slot in self.__gridSlots]
         return buttons.index(button)
 
     def __onButtonEnter(self, button):
+        # type: (QToolButton) -> None
         action = button.defaultAction()
         self.actionHovered.emit(action)
 
+    @Slot(QObject)
     def __onClicked(self, action):
+        # type: (QAction) -> None
+        assert isinstance(action, QAction)
         self.actionTriggered.emit(action)
 
-    def paintEvent(self, event):
-        return utils.StyledWidget_paintEvent(self, event)
-
     def eventFilter(self, obj, event):
+        # type: (QObject, QEvent) -> bool
         etype = event.type()
         if etype == QEvent.KeyPress and obj.hasFocus():
             key = event.key()
@@ -402,7 +490,8 @@ class ToolGrid(QFrame):
         return super().eventFilter(obj, event)
 
     def __focusMove(self, focus, key):
-        assert(focus is self.focusWidget())
+        # type: (QWidget, Qt.Key) -> bool
+        assert focus is self.focusWidget()
         try:
             index = self.__indexOf(focus)
         except IndexError:
@@ -417,7 +506,7 @@ class ToolGrid(QFrame):
         elif key == Qt.Key_Right:
             index += 1
 
-        if index >= 0 and index < self.count():
+        if 0 <= index < self.count():
             button = self.__gridSlots[index].button
             button.setFocus(Qt.TabFocusReason)
             return True
